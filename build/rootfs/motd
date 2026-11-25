@@ -1,0 +1,5 @@
+
+  welcome to linux, running on a 486 made of scratch blocks.
+  every instruction you see is a cat-approved "if <> then".
+  try: uname -a   cat /proc/cpuinfo   free   ps   ls /bin
+

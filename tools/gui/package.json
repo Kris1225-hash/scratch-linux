@@ -1,0 +1,8 @@
+{
+  "name": "scratch-linux-gui",
+  "private": true,
+  "description": "the stock scratch editor, for looking at the project locally",
+  "dependencies": {
+    "@scratch/scratch-gui": "15.3.0"
+  }
+}

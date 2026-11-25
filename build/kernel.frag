@@ -1,0 +1,90 @@
+# --- cpu: a 486SX. no fpu (kernel math emulation), no tsc, no pae, no apic
+CONFIG_M486SX=y
+CONFIG_MATH_EMULATION=y
+CONFIG_MODIFY_LDT_SYSCALL=y
+# CONFIG_SMP is not set
+# CONFIG_X86_UP_APIC is not set
+# CONFIG_X86_MCE is not set
+# CONFIG_MTRR is not set
+# CONFIG_X86_PAT is not set
+# CONFIG_VM86 is not set
+# CONFIG_X86_IOPL_IOPERM is not set
+# CONFIG_HIGHMEM4G is not set
+CONFIG_NOHIGHMEM=y
+CONFIG_PROCESSOR_SELECT=y
+CONFIG_CPU_SUP_INTEL=y
+# CONFIG_CPU_SUP_CYRIX_32 is not set
+# CONFIG_CPU_SUP_AMD is not set
+# CONFIG_CPU_SUP_HYGON is not set
+# CONFIG_CPU_SUP_CENTAUR is not set
+# CONFIG_CPU_SUP_TRANSMETA_32 is not set
+# CONFIG_CPU_SUP_UMC_32 is not set
+# CONFIG_CPU_SUP_ZHAOXIN is not set
+# CONFIG_CPU_SUP_VORTEX_32 is not set
+# CONFIG_RELOCATABLE is not set
+CONFIG_PHYSICAL_START=0x100000
+CONFIG_PHYSICAL_ALIGN=0x100000
+CONFIG_UNWINDER_GUESS=y
+# CONFIG_UNWINDER_FRAME_POINTER is not set
+# CONFIG_STACKPROTECTOR is not set
+# CONFIG_CPU_MITIGATIONS is not set
+# zero-initialising every stack frame is ~wasted instructions when each one costs 50 scratch blocks
+CONFIG_INIT_STACK_NONE=y
+# CONFIG_INIT_STACK_ALL_ZERO is not set
+# the blake2s self-test alone was 30% of all instructions executed during boot. the switch that turns the
+# lib/crypto self-tests off only exists when CONFIG_CRYPTO does
+CONFIG_CRYPTO=y
+CONFIG_CRYPTO_MANAGER_DISABLE_TESTS=y
+# --- time
+CONFIG_HZ_100=y
+CONFIG_HZ_PERIODIC=y
+# CONFIG_NO_HZ_IDLE is not set
+# CONFIG_HIGH_RES_TIMERS is not set
+CONFIG_POSIX_TIMERS=y
+# --- console: one 16550, nothing else
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_EARLY_PRINTK=y
+CONFIG_LOG_BUF_SHIFT=14
+CONFIG_TTY=y
+# CONFIG_VT is not set
+# CONFIG_UNIX98_PTYS is not set
+# CONFIG_LEGACY_PTYS is not set
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_8250_NR_UARTS=1
+CONFIG_SERIAL_8250_RUNTIME_UARTS=1
+# CONFIG_SERIAL_8250_DEPRECATED_OPTIONS is not set
+# CONFIG_INPUT is not set
+# CONFIG_SERIO is not set
+# CONFIG_HW_RANDOM is not set
+# CONFIG_DEVMEM is not set
+# CONFIG_DEVPORT is not set
+# --- userland
+CONFIG_BLK_DEV_INITRD=y
+# (CONFIG_INITRAMFS_SOURCE, the list of what goes into the root filesystem, is added by build.sh)
+CONFIG_INITRAMFS_COMPRESSION_NONE=y
+# CONFIG_RD_GZIP is not set
+# CONFIG_RD_BZIP2 is not set
+# CONFIG_RD_LZMA is not set
+# CONFIG_RD_XZ is not set
+# CONFIG_RD_LZO is not set
+# CONFIG_RD_LZ4 is not set
+# CONFIG_RD_ZSTD is not set
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+# CONFIG_COREDUMP is not set
+CONFIG_PROC_FS=y
+CONFIG_PROC_SYSCTL=y
+CONFIG_SYSCTL=y
+CONFIG_SYSFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_SHMEM=y
+CONFIG_TMPFS=y
+CONFIG_FUTEX=y
+CONFIG_MULTIUSER=y
+CONFIG_COMPAT_32BIT_TIME=y
+# --- debuggability while the emulator is young
+CONFIG_BUG=y
+CONFIG_KALLSYMS=y
+CONFIG_DEBUG_BUGVERBOSE=y

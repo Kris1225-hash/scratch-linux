@@ -1,0 +1,21 @@
+{
+  "name": "scratch-linux",
+  "version": "0.1.0",
+  "private": true,
+  "description": "an i486 pc emulator written in scratch blocks, booting mainline linux",
+  "license": "MIT",
+  "type": "commonjs",
+  "scripts": {
+    "kernel": "./build/docker.sh",
+    "build": "node tools/build_sb3.js",
+    "boot": "node tools/run_sb3.js --until-prompt",
+    "js": "node tools/run.js",
+    "gui": "node tools/gui/serve.js",
+    "test": "node test/compile_check.js && node test/sbl_basic.js && node tools/diffrun.js --max 12000000",
+    "lockstep": "node tools/lockstep.js"
+  },
+  "dependencies": {
+    "@scratch/scratch-vm": "^15.3.0",
+    "jszip": "^3.10.2"
+  }
+}

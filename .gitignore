@@ -1,0 +1,20 @@
+# everything that gets built: the scratch project, the kernel, profiles, logs. nothing compiled is ever committed,
+# the repo holds the sources, configs and build scripts and anyone can build their own.
+out/
+build/work/
+node_modules/
+*.sb3
+*.sb3.zip
+vmlinux
+vmlinux.*
+bzImage
+System.map
+*.bin
+*.o
+*.ko
+*.cpio
+*.img
+busybox
+*.cpuprofile
+*.log
+.DS_Store

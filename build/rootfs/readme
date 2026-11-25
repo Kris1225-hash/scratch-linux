@@ -1,0 +1,3 @@
+this machine is an i486SX emulator written in scratch blocks.
+no fpu: the kernel emulates x87 for you (slowly).
+ram, cpu and uart are scratch lists. be gentle.

@@ -1,0 +1,30 @@
+'use strict';
+// a 64K "bios" for qemu that does what a 32-bit linux boot loader would leave behind: protected mode,
+// flat segments, esi -> boot_params, jump to the kernel at 1M. the scratch emulator starts in exactly this state.
+function mkrom(entry = 0x100000, bootParams = 0x10000) {
+  const rom = Buffer.alloc(0x10000, 0);
+  const put = (off, bytes) => Buffer.from(bytes).copy(rom, off);
+  const le32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+  // gdt: null, flat code (0x08), flat data (0x10)
+  put(0x80, [0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 0, 0x9b, 0xcf, 0, 0xff, 0xff, 0, 0, 0, 0x93, 0xcf, 0]);
+  put(0x70, [0x17, 0x00, ...le32(0xf0080)]);
+  // 32-bit entry at f0100
+  put(0x100, [
+    0x66, 0xb8, 0x10, 0x00,                 // mov ax, 0x10
+    0x8e, 0xd8, 0x8e, 0xc0, 0x8e, 0xd0, 0x8e, 0xe0, 0x8e, 0xe8,   // mov ds/es/ss/fs/gs, ax
+    0xbe, ...le32(bootParams),              // mov esi, boot_params
+    0x31, 0xdb, 0x31, 0xed, 0x31, 0xff, 0x31, 0xc0, 0x31, 0xc9, 0x31, 0xd2,   // xor ebx/ebp/edi/eax/ecx/edx
+    0xbc, ...le32(0x7000),                  // mov esp, 0x7000
+    0xea, ...le32(entry), 0x08, 0x00,       // jmp 0x08:entry
+  ]);
+  // real mode stub at f000:ff00
+  put(0xff00, [
+    0xfa,                                   // cli
+    0x2e, 0x66, 0x0f, 0x01, 0x16, 0x70, 0x00,   // lgdt cs:[0x70]
+    0x0f, 0x20, 0xc0, 0x0c, 0x01, 0x0f, 0x22, 0xc0,   // mov eax,cr0 ; or al,1 ; mov cr0,eax
+    0x66, 0xea, ...le32(0xf0100), 0x08, 0x00,   // jmp dword 0x08:0xf0100
+  ]);
+  put(0xfff0, [0xea, 0x00, 0xff, 0x00, 0xf0]);    // reset vector: jmp f000:ff00
+  return rom;
+}
+module.exports = { mkrom };

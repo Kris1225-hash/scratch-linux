@@ -1,0 +1,2 @@
+PS1="root@scratch:\$PWD# "
+alias ll='ls -l'

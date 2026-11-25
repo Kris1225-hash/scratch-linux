@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>scratch (loading the project ...)</title>
+<style>html, body, #app { height: 100%; margin: 0; }</style></head>
+<body><div id="app"></div>
+<script>
+  // nothing here can be saved anyway: keep the editor from asking "leave site?" on every reload
+  window.addEventListener('beforeunload', (e) => e.stopImmediatePropagation(), true);
+</script>
+<script src="scratch-gui-standalone.js"></script>
+<script>
+  // the unmodified scratch editor (the standalone bundle of @scratch/scratch-gui) with the project loaded into it.
+  //   ?player   stage only, like a project page      ?go   also press the green flag      ?empty   load nothing
+  const q = new URLSearchParams(location.search);
+  const app = document.getElementById('app');
+  GUI.setAppElement(app);
+  const state = new GUI.EditorState({ isPlayerOnly: q.has('player') });
+  GUI.createStandaloneRoot(state, app).render({ canSave: false, canEditTitle: true });
+  const gui = () => state.store.getState().scratchGui;
+  window.scratchVm = () => gui().vm;
+  window.loaded = false;
+  if (!q.has('empty')) {
+    // as soon as the editor has its vm and renderer up, hand it the project
+    const wait = setInterval(async () => {
+      if (!gui().vm || !gui().vm.runtime.renderer) return;
+      clearInterval(wait);
+      const buf = await (await fetch('/project.sb3')).arrayBuffer();
+      await gui().vm.loadProject(buf);
+      window.loaded = true;
+      document.title = 'linux in scratch';
+      if (q.has('go')) gui().vm.greenFlag();
+    }, 100);
+  }
+</script></body></html>
