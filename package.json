@@ -13,6 +13,7 @@
     "boot:site": "node tools/run_sb3.js --sb3 out/linux-site.sb3 --until-prompt --secs 180",
     "js": "node tools/run.js",
     "gui": "node tools/gui/serve.js",
+    "qemu": "node tools/qemu.js",
     "test": "node test/compile_check.js && node test/sbl_basic.js && node tools/diffrun.js --max 12000000 && node tools/diffrun.js --site --max 12000000",
     "lockstep": "node tools/lockstep.js"
   },

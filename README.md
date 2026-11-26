@@ -180,6 +180,29 @@ blocks a hot loop touches (`test/bench_locality.js` shows the effect in isolatio
 `npm test` runs the quick ones. the kernel itself is the best test there is: it does not boot on a cpu that is
 almost right.
 
+## "that is not real linux"
+
+it is the kernel from kernel.org, built by [`build/build.sh`](build/build.sh), and the very same file boots in
+qemu:
+
+```
+node tools/qemu.js            # a shell on your terminal in under a second. ctrl-a x leaves
+```
+
+same `vmlinux`, same boot parameters and command line, the same kind of cpu (a 486 without fpu), 16 MB, entered
+the way the scratch machine enters it: straight at the 32-bit entry point (qemu's own `-kernel` wants a bzImage
+with a real-mode boot sector, and there is no real mode here). then type the same things on both sides:
+
+```
+uname -a                 Linux scratch 6.12.119 #1 Wed Nov 25 12:00:00 UTC 2026 i486
+cat /proc/version        the same compiler and build stamp
+md5sum /bin/busybox      the same hash. the scratch one needs a while: it is hashing 400 KB with "if <> then"
+```
+
+(in qemu the welcome message claims to be running on scratch blocks. it is the same root filesystem.)
+for transcripts instead of typing: `node tools/qemu.js --input 'uname -a\nmd5sum /bin/busybox\n'` and
+`node tools/run_sb3.js --keys 'uname -a\nmd5sum /bin/busybox\n'`.
+
 ## how fast
 
 the boot is 8.5 million instructions. the stock scratch interpreter runs a block in 50 to 100 ns, an emulated
@@ -199,8 +222,8 @@ sbl/      the language: parser, scratch (.sb3) backend, javascript backend, head
 emu/      the machine, in sbl: cpu core, handlers, decoder, system instructions, devices, terminal + keyboard,
           the two memory models (mem.js), the unpacker of the site build (unpack.js)
 build/    kernel config fragment, busybox config, /init, the scripts that build them
-tools/    build_sb3 (the project), zpack (the kernel as text), run / run_sb3 (boot it), lockstep / diffrun
-          (check it), profilers, gui
+tools/    build_sb3 (the project), zpack (the kernel as text), run / run_sb3 (boot it), qemu (boot the same
+          kernel in qemu), lockstep / diffrun (check it), profilers, gui
 test/     compiler tests and interpreter benchmarks
 ```
 

@@ -3,6 +3,7 @@
 // boot out/linux.sb3 in the real scratch-vm (no browser), print what the terminal sprite shows
 //   node tools/run_sb3.js [--secs N] [--sb3 path] [--keys "cmd\ncmd\n"] [--type "cmd\ncmd"]
 //   --keys presses real keys (the keyboard path), --type taps the screen and answers the ask box (the touch path)
+//   (--keys waits for the shell prompt after every enter, and the run ends when the last command is done)
 const fs = require('fs');
 const path = require('path');
 const { boot } = require('../sbl/vmrun');
@@ -40,7 +41,7 @@ const KEYS = opt('--keys', null);
   let last = '', lastPrint = 0, steps = 0, lastType = 0, tapped = false;
   // key presses: one character every couple of frames once the prompt is up
   const keyq = KEYS ? [...KEYS.replace(/\\n/g, '\n')] : [];
-  let keyDown = null, keyWait = 0, keysStarted = false, bootSecs = 0, powerSecs = 0;
+  let keyDown = null, keyWait = 0, keysStarted = false, bootSecs = 0, powerSecs = 0, enterAt = -1;
   const NAMES = { '\n': 'Enter', '\t': 'ArrowRight', '\b': 'ArrowLeft' };
   const atPrompt = () => /# $/.test(screen().split('\n').pop() + ' ');
   while ((Date.now() - start) / 1000 < SECS) {
@@ -65,13 +66,17 @@ const KEYS = opt('--keys', null);
       m.vm.runtime.emit('ANSWER', lines.shift());
     }
     if (keyDown !== null) { m.vm.postIOData('keyboard', { key: keyDown, isDown: false }); keyDown = null; keyWait = 2; }
+    else if (enterAt >= 0) {
+      // a command is running: the next key (or the end of the run) waits for the prompt to come back
+      if (steps - enterAt > 12 && steps % 4 === 0 && atPrompt()) { enterAt = -1; if (!keyq.length) break; }
+    }
     else if (keyq.length && --keyWait <= 0 && (keysStarted || (keysStarted = atPrompt()))) {
       let ch = keyq.shift();
       // capitals go through the shift stand-in (up arrow), like a person would have to
       if (ch >= 'A' && ch <= 'Z') { m.vm.postIOData('keyboard', { key: 'ArrowUp', isDown: true }); m.vm.postIOData('keyboard', { key: 'ArrowUp', isDown: false }); m.step(); ch = ch.toLowerCase(); }
       keyDown = NAMES[ch] || ch;
       m.vm.postIOData('keyboard', { key: keyDown, isDown: true });
-      if (ch === '\n') keyWait = 60;
+      if (ch === '\n') enterAt = steps;
     }
     if (+m.getVar('halted') === 2) { for (let i = 0; i < 5; i++) m.step(); break; }
   }
