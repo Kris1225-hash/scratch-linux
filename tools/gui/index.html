@@ -10,6 +10,7 @@
 <script>
   // the unmodified scratch editor (the standalone bundle of @scratch/scratch-gui) with the project loaded into it.
   //   ?player   stage only, like a project page      ?go   also press the green flag      ?empty   load nothing
+  //   ?site     the scratch.mit.edu build (out/linux-site.sb3) instead of out/linux.sb3
   const q = new URLSearchParams(location.search);
   const app = document.getElementById('app');
   GUI.setAppElement(app);
@@ -23,7 +24,7 @@
     const wait = setInterval(async () => {
       if (!gui().vm || !gui().vm.runtime.renderer) return;
       clearInterval(wait);
-      const buf = await (await fetch('/project.sb3')).arrayBuffer();
+      const buf = await (await fetch(q.has('site') ? '/site.sb3' : '/project.sb3')).arrayBuffer();
       await gui().vm.loadProject(buf);
       window.loaded = true;
       document.title = 'linux in scratch';

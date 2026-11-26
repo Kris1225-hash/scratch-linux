@@ -73,6 +73,8 @@ proc frame() {
 }
 on flag {
   power = 0; asking = 0; has_kbd = 0; touch = 0;
+  ${cfg.lazy ? '// build the big lists, then have the terminal sprite unpack the kernel into them (emu/unpack.js)\n  alloc(); and8_init();' : ''}
+  ${cfg.packed ? 'broadcast_wait("unpack");' : ''}
   boot();
   power = 1;
   forever { frame(); }
@@ -262,7 +264,7 @@ proc term_init() {
   t_top = 0; cx = 0; cy = 0; t_esc = 0; t_msg = 0; t_redraw = 1; v_off = 0; t_skip = 9;
   sh_mode = 0; ct_mode = 0; st_dirty = 1;
   size(100); show();
-  puts("486SX + 16550 + 8259 + 8254, all of it scratch blocks. loading linux 6.12 ...");
+  puts("486SX + 16550 + 8259 + 8254, all of it scratch blocks.${cfg.packed ? '' : ' loading linux 6.12 ...'}");
   putc(13); putc(10);
 }
 proc term_frame() {
@@ -293,9 +295,10 @@ proc term_frame() {
   costume("cursor");
   if (cx >= COLS) { goto(${X0 + (COLS - 1) * CELL_W}, ${Y0} - (cy - v_off) * ${CELL_H}); } else { goto(cx * ${CELL_W} + ${X0}, ${Y0} - (cy - v_off) * ${CELL_H}); }
 }
+${cfg.packed ? require('./unpack')(cfg).term : ''}
 on flag {
   term_init();
-  forever { term_frame(); }
+  forever { ${cfg.packed ? 'if (z_busy == 0) { term_frame(); }' : 'term_frame();'} }
 }
 `;
 };

@@ -4,6 +4,15 @@
 
 module.exports = function core(cfg) {
   const RAM = cfg.ramMB * 1048576;
+  const M = require('./mem')(cfg);
+  const { TR, TW, paged } = M;
+  const cold = M.coldLists(RAM / 4096);
+  // pick the cold list a page lives in (pl_k) with a little tree of comparisons, and run "leaf" on it
+  const coldTree = (lo, hi, leaf) => {
+    if (hi - lo === 1) return leaf(cold[lo].name);
+    const mid = (lo + hi) >> 1;
+    return `if (pl_k < ${mid}) { ${coldTree(lo, mid, leaf)} } else { ${coldTree(mid, hi, leaf)} }`;
+  };
   return `
 const M32 = 4294967296;
 const SIGN = 2147483648;
@@ -13,7 +22,7 @@ const RAM_BYTES = ${RAM};
 const RAM_PAGES = RAM_BYTES / 4096;
 const DUMMY_PAGE = RAM_PAGES;          // physical accesses outside ram land in this scratch page
 const MEM_WORDS = RAM_BYTES / 4 + 1024;
-const TLB_HALF = 1048576;              // one entry per linear page; second half is the cpl 3 view
+const TLB_HALF = ${paged ? 1024 : 1048576};              // ${paged ? 'one table slot per 4 MB of linear addresses' : 'one entry per linear page'}; second half is the cpl 3 view
 const BN = ${cfg.blockSlots};          // block cache slots
 const TN = ${cfg.traceSize};           // trace entries
 const TR_STOP = 1;                     // trace entry that just stops the machine
@@ -41,15 +50,30 @@ var halted = 0, halt_code = 0, halt_info = 0;
 var flt = 0, fetching = 0, exc_depth = 0, nexc = 0;
 
 // ---------------------------------------------------------------- memory
-list memw[MEM_WORDS];
+${paged ? `// paged model (see emu/mem.js): memw is ${M.NF} page frames, ram itself sits in the cold lists
+const NF = ${M.NF};
+const CPP = ${M.CPP};                        // physical pages per cold list
+list memw[NF * 1024];
+${cold.map((c) => `list ${c.name}[${c.pages * 1024}];`).join(' ')}
+list pgf[RAM_PAGES + 2];               // physical page -> the frame it is in (1..NF), 0 = cold
+list fr_pp[NF];                        // frame -> physical page + 1, 0 = free
+list fr_ref[NF];                       // touched since the clock hand last came by
+list fr_dirty[NF];                     // has been mapped for writing since it was loaded
+list fr_e[NF * 8]; list fr_n[NF]; list fr_g[NF];   // the tlb entries that point into a frame: up to 8 slots in tlbP, how many (9 = lost count), as of which tlbgen
+// the tlb is two levels deep: tlb1R / tlb1W say where the table for a 4 MB stretch of linear addresses starts
+// in tlbP (1 = no table yet: that is the first table, which stays empty); an entry is "tlb entry" as before
+list tlb1R[TLB_HALF * 2];
+list tlb1W[TLB_HALF * 2];
+list tlbP[NF * 1024];
+list ctT[8192]; list ctP[8192];        // linear page -> physical page for code lookups (tagged like the jump cache)` : `list memw[MEM_WORDS];
 list tlbR[TLB_HALF * 2];
-list tlbW[TLB_HALF * 2];
+list tlbW[TLB_HALF * 2];`}
 list tlbRU[0];
 list tlbWU[0];
 list codepg[RAM_PAGES + 2];            // 1 = some cached block was decoded from this physical page
 list POW2 = data("pow2");              // POW2[n + 1] = 2^n, n = 0..32
 list POW256 = [1, 256, 65536, 16777216];
-list AND8 = data("and8");              // AND8[a * 256 + b + 1] = a & b
+${cfg.lazy ? 'list AND8[65536];' : 'list AND8 = data("and8");'}              // AND8[a * 256 + b + 1] = a & b
 list PARITY = data("parity");          // PARITY[b + 1] = 1 if b has an even number of set bits
 list FSH = [1, 65536, 16777216];       // flag normalisation shift by size code
 
@@ -69,14 +93,177 @@ var spw = 1;
 proc sp_sync() {
   spw = 1;
   if (reg[5] % 4 == 0) {
-    q = tlbW[floor(reg[5] / 4096) + tlbOff];
+    q = ${TW('reg[5]')};
     if (q != 0) { spw = q + reg[5] / 4; }
   }
 }
 // ---- tlb
 var tf_vp = 0, tf_pp = 0, tf_a = 0, tf_b = 0, tf_pde = 0, tf_pte = 0, tf_n = 0, tf_i = 0, tf_err = 0;
 
+${paged ? `var tlbPn = 1025, tf_t = 0, tf_e = 0, tf_f = 0, tf_ok = 0, ta_i = 0, td_i = 0;
+var tlbgen = 1;                         // goes up whenever the whole tlb is emptied: the frames' entry lists are void then
 proc tlb_flush() {
+  tlbgen += 1;
+  tf_i = 1;
+  repeat (len(tlbRU)) { tlbP[tlbRU[tf_i]] = 0; tf_i += 1; }
+  clear(tlbRU);
+  tlbw_flush();
+  new_epoch();
+}
+proc tlbw_flush() {
+  spw = 1;
+  tf_i = 1;
+  repeat (len(tlbWU)) { tlbP[tlbWU[tf_i]] = 0; tf_i += 1; }
+  clear(tlbWU);
+}
+// forget every cached translation, for our own reasons. nothing changed for the guest, so the epoch stays; and
+// the stack window stays too: its frame is never given away (see pg_in)
+proc tlb_drop() {
+  tlbgen += 1;
+  td_i = 1;
+  repeat (len(tlbRU)) { tlbP[tlbRU[td_i]] = 0; td_i += 1; }
+  clear(tlbRU);
+  td_i = 1;
+  repeat (len(tlbWU)) { tlbP[tlbWU[td_i]] = 0; td_i += 1; }
+  clear(tlbWU);
+}
+proc tlb_invlpg(lin) {
+  tf_vp = floor(lin / 4096);
+  tf_i = floor(tf_vp / 1024) + 1; tf_e = tf_vp % 1024;
+  tlbP[tlb1R[tf_i] + tf_e] = 0; tlbP[tlb1R[tf_i + TLB_HALF] + tf_e] = 0;
+  tlbP[tlb1W[tf_i] + tf_e] = 0; tlbP[tlb1W[tf_i + TLB_HALF] + tf_e] = 0;
+  new_epoch(); spw = 1;
+}
+// a fresh second-level table -> tf_t. when they are all taken, start over with none
+proc tlb_alloc() {
+  if (tlbPn > NF * 1024 - 1023) {
+    tlb_drop(); spw = 1;
+    ta_i = 1; repeat (TLB_HALF * 2) { tlb1R[ta_i] = 1; tlb1W[ta_i] = 1; ta_i += 1; }
+    tlbPn = 1025;
+  }
+  tf_t = tlbPn; tlbPn += 1024;
+}
+
+// ---- page frames
+var hand = 0, nevict = 0, npgin = 0, npgout = 0, pin_a = 0, pin_b = 0, pin_c = 0, pin_d = 0, pin_s = 0;
+var pi_f = 0, pi_old = 0, pl_k = 0, pl_c = 0, pl_h = 0, pm_f = 0, pm_h = 0;
+// copy physical page pp from its cold list into frame f (0-based) / back
+proc pg_load(pp, f) {
+  pl_k = floor(pp / CPP); pl_c = (pp % CPP) * 1024 + 1; pl_h = f * 1024 + 1;
+  ${coldTree(0, cold.length, (c) => `repeat (1024) { memw[pl_h] = ${c}[pl_c]; pl_h += 1; pl_c += 1; }`)}
+}
+proc pg_store(pp, f) {
+  pl_k = floor(pp / CPP); pl_c = (pp % CPP) * 1024 + 1; pl_h = f * 1024 + 1;
+  ${coldTree(0, cold.length, (c) => `repeat (1024) { ${c}[pl_c] = memw[pl_h]; pl_h += 1; pl_c += 1; }`)}
+}
+// take the tlb entries that point into frame f away again
+var fi_k = 0;
+proc fr_inval(f) {
+  if (fr_g[f] == tlbgen) {
+    if (fr_n[f] > 8) { tlb_drop(); }
+    else { fi_k = (f - 1) * 8; repeat (fr_n[f]) { fi_k += 1; tlbP[fr_e[fi_k]] = 0; } }
+  }
+  fr_n[f] = 0; fr_g[f] = tlbgen;
+}
+// bring physical page pp into a frame -> pi_f (1..NF). the frame is found clock-fashion: the hand skips frames
+// that were touched since it last came by, taking their tlb entries away so that the next touch shows up again
+// ("touched" is only ever noticed when the tlb is filled). a frame it finds untouched has no entries left and
+// can go. never the frames somebody may still hold an address in, though: the last four the tlb handed out, and
+// the one under the stack window.
+proc pg_in(pp) {
+  if (spw == 1) { pin_s = 0; } else { pin_s = floor((spw - 1) / 1024) + 1; }
+  pi_f = 0;
+  until (pi_f > 0) {
+    hand = hand % NF + 1;
+    if (fr_ref[hand] == 1) { fr_ref[hand] = 0; fr_inval(hand); }
+    else { if (hand != pin_a && hand != pin_b && hand != pin_c && hand != pin_d && hand != pin_s) { pi_f = hand; } }
+  }
+  pi_old = fr_pp[pi_f];
+  if (pi_old > 0) {
+    if (fr_dirty[pi_f] == 1) { pg_store(pi_old - 1, pi_f - 1); npgout += 1; }
+    pgf[pi_old] = 0;
+    nevict += 1;
+  }
+  pg_load(pp, pi_f - 1);
+  pgf[pp + 1] = pi_f; fr_pp[pi_f] = pp + 1; fr_dirty[pi_f] = 0;
+  npgin += 1;
+}
+// physical page pp, for the page walk -> pm_f (its frame), pm_h (memw index of its first word)
+proc pm_get(pp) {
+  pm_f = pgf[pp + 1];
+  if (pm_f == 0) { pg_in(pp); pm_f = pi_f; }
+  fr_ref[pm_f] = 1;
+  pm_h = (pm_f - 1) * 1024 + 1;
+}
+// the page walk for linear page tf_vp (address lin): tf_ok = 1 and tf_pp = physical page, or tf_ok = 0 after
+// delivering #PF (flt = 1). sets accessed / dirty bits like the real thing.
+// (delivering the fault walks pages itself, for the stack it pushes to: tf_ok is set again afterwards)
+proc walk(lin, wr) {
+  tf_ok = 0;
+  if (pg_on == 0) { tf_pp = tf_vp; tf_ok = 1; return; }
+  pm_get(floor(cr3 / 4096));
+  tf_a = pm_h + floor(tf_vp / 1024);
+  tf_pde = memw[tf_a];
+  tf_err = wr * 2 + (cpl == 3) * 4;
+  if (tf_pde % 2 == 0) { page_fault(lin, tf_err); tf_ok = 0; return; }
+  // the directory entry counts as accessed as soon as the walk goes through it, even if the walk then faults
+  if (floor(tf_pde / 32) % 2 == 0) { tf_pde += 32; memw[tf_a] = tf_pde; fr_dirty[pm_f] = 1; }
+  tf_b = floor(tf_pde / 4096);
+  if (tf_b >= RAM_PAGES) { fatal(11, tf_pde); tf_ok = 0; return; }
+  pm_get(tf_b);
+  tf_b = pm_h + tf_vp % 1024;
+  tf_pte = memw[tf_b];
+  if (tf_pte % 2 == 0) { page_fault(lin, tf_err); tf_ok = 0; return; }
+  if (cpl == 3) {
+    if ((floor(tf_pde / 4) % 2) * (floor(tf_pte / 4) % 2) == 0) { page_fault(lin, tf_err + 1); tf_ok = 0; return; }
+  }
+  if (wr == 1) {
+    if ((floor(tf_pde / 2) % 2) * (floor(tf_pte / 2) % 2) == 0) {
+      if (cpl == 3 || wp_on == 1) { page_fault(lin, tf_err + 1); tf_ok = 0; return; }
+    }
+  }
+  tf_n = tf_pte;
+  if (floor(tf_pte / 32) % 2 == 0) { tf_n += 32; }
+  if (wr == 1) { if (floor(tf_pte / 64) % 2 == 0) { tf_n += 64; } }
+  if (tf_n != tf_pte) { memw[tf_b] = tf_n; fr_dirty[pm_f] = 1; }
+  tf_pp = floor(tf_pte / 4096);
+  tf_ok = 1;
+}
+// translate linear address lin for reading (wr = 0) or writing (wr = 1) at the current privilege and cache it.
+// success: q = tlb entry.  failure: #PF has been delivered and flt = 1.
+// entry format: memw index = entry + lin / 4, i.e. entry = (frame - lin_page) * 1024 + 1  (never 0, so 0 = miss)
+proc tlb_fill(lin, wr) {
+  tf_vp = floor(lin / 4096);
+  walk(lin, wr);
+  if (tf_ok == 0) { return; }
+  if (tf_pp >= RAM_PAGES) { tf_pp = DUMMY_PAGE; }
+  tf_f = pgf[tf_pp + 1];
+  if (tf_f == 0) { pg_in(tf_pp); tf_f = pi_f; }
+  fr_ref[tf_f] = 1;
+  pin_d = pin_c; pin_c = pin_b; pin_b = pin_a; pin_a = tf_f;
+  q = (tf_f - 1 - tf_vp) * 1024 + 1;
+  tf_i = floor(tf_vp / 1024) + tlbOff;
+  if (wr == 1) {
+    fr_dirty[tf_f] = 1;
+    if (codepg[tf_pp + 1] == 1) { invalidate_page(tf_pp); }
+    tf_t = tlb1W[tf_i];
+    if (tf_t == 1) { tlb_alloc(); tlb1W[tf_i] = tf_t; }
+    tf_e = tf_t + tf_vp % 1024;
+    tlbP[tf_e] = q; push(tlbWU, tf_e);
+    if (len(tlbWU) > 150000) { tlbw_flush(); tlbP[tf_e] = q; push(tlbWU, tf_e); }
+  } else {
+    tf_t = tlb1R[tf_i];
+    if (tf_t == 1) { tlb_alloc(); tlb1R[tf_i] = tf_t; }
+    tf_e = tf_t + tf_vp % 1024;
+    tlbP[tf_e] = q; push(tlbRU, tf_e);
+    if (len(tlbRU) > 150000) { tlb_flush(); tlbP[tf_e] = q; push(tlbRU, tf_e); }
+  }
+  // remember the entry with its frame
+  if (fr_g[tf_f] != tlbgen) { fr_g[tf_f] = tlbgen; fr_n[tf_f] = 0; }
+  if (fr_n[tf_f] < 8) { fr_n[tf_f] += 1; fr_e[(tf_f - 1) * 8 + fr_n[tf_f]] = tf_e; } else { fr_n[tf_f] = 9; }
+}
+
+` : `proc tlb_flush() {
   tf_i = 1;
   repeat (len(tlbRU)) { tlbR[tlbRU[tf_i]] = 0; tf_i += 1; }
   clear(tlbRU);
@@ -140,7 +327,7 @@ proc tlb_fill(lin, wr) {
   }
 }
 
-proc page_fault(lin, err) {
+`}proc page_fault(lin, err) {
   cr2 = lin;
   exc(14, err, 1);
 }
@@ -150,12 +337,12 @@ proc page_fault(lin, err) {
 var m_a = 0, m_v = 0, m_u = 0, m_i = 0, m_w = 0, m_s = 0;
 
 proc rd8(lin) {                         // -> rv
-  q = tlbR[floor(lin / 4096) + tlbOff];
+  q = ${TR('lin')};
   if (q == 0) { tlb_fill(lin, 0); if (flt == 1) { return; } }
   rv = floor(itemf(memw, q + lin / 4) / POW256[lin % 4 + 1]) % 256;
 }
 proc wr8(lin, v) {
-  q = tlbW[floor(lin / 4096) + tlbOff];
+  q = ${TW('lin')};
   if (q == 0) { tlb_fill(lin, 1); if (flt == 1) { return; } }
   m_i = q + floor(lin / 4); m_s = POW256[lin % 4 + 1]; m_w = memw[m_i];
   memw[m_i] = m_w + (v - floor(m_w / m_s) % 256) * m_s;
@@ -167,7 +354,7 @@ proc rd16(lin) {                        // -> rv
     rv = m_v + rv * 256;
     return;
   }
-  q = tlbR[floor(lin / 4096) + tlbOff];
+  q = ${TR('lin')};
   if (q == 0) { tlb_fill(lin, 0); if (flt == 1) { return; } }
   rv = floor(itemf(memw, q + lin / 4) / POW256[lin % 4 + 1]) % 65536;
 }
@@ -178,14 +365,14 @@ proc wr16(lin, v) {
     wr8(lin, v % 256); wr8((lin + 1) % M32, floor(v / 256));
     return;
   }
-  q = tlbW[floor(lin / 4096) + tlbOff];
+  q = ${TW('lin')};
   if (q == 0) { tlb_fill(lin, 1); if (flt == 1) { return; } }
   m_i = q + floor(lin / 4); m_s = POW256[lin % 4 + 1]; m_w = memw[m_i];
   memw[m_i] = m_w + (v - floor(m_w / m_s) % 65536) * m_s;
 }
 proc rd32(lin) {                        // -> rv
   if (lin % 4 == 0) {
-    q = tlbR[floor(lin / 4096) + tlbOff];
+    q = ${TR('lin')};
     if (q == 0) { tlb_fill(lin, 0); if (flt == 1) { return; } }
     rv = memw[q + lin / 4];
     return;
@@ -196,7 +383,7 @@ proc rd32(lin) {                        // -> rv
 proc rd32u(lin) {
   m_a = lin % 4;
   if (lin % 4096 < 4093) {
-    q = tlbR[floor(lin / 4096) + tlbOff];
+    q = ${TR('lin')};
     if (q == 0) { tlb_fill(lin, 0); if (flt == 1) { return; } }
     m_i = q + floor(lin / 4); m_s = POW256[m_a + 1];
     rv = floor(memw[m_i] / m_s) + (memw[m_i + 1] % m_s) * POW256[5 - m_a];
@@ -208,7 +395,7 @@ proc rd32u(lin) {
 }
 proc wr32(lin, v) {
   if (lin % 4 == 0) {
-    q = tlbW[floor(lin / 4096) + tlbOff];
+    q = ${TW('lin')};
     if (q == 0) { tlb_fill(lin, 1); if (flt == 1) { return; } }
     memw[q + lin / 4] = v;
     return;
@@ -218,7 +405,7 @@ proc wr32(lin, v) {
 proc wr32u(lin, v) {
   m_a = lin % 4;
   if (lin % 4096 < 4093) {
-    q = tlbW[floor(lin / 4096) + tlbOff];
+    q = ${TW('lin')};
     if (q == 0) { tlb_fill(lin, 1); if (flt == 1) { return; } }
     m_i = q + floor(lin / 4); m_s = POW256[m_a + 1]; m_v = POW256[5 - m_a];
     memw[m_i] = memw[m_i] % m_s + (v % m_v) * m_s;
@@ -232,16 +419,16 @@ proc wr32u(lin, v) {
 }
 // make sure lin is writable (so a multi-part write cannot fault half way)
 proc wchk(lin) {
-  q = tlbW[floor(lin / 4096) + tlbOff];
+  q = ${TW('lin')};
   if (q == 0) { tlb_fill(lin, 1); }
 }
 // a read-modify-write instruction touches its operand as a read first and then as a write (that is what qemu
 // does, and it is visible: a not-present page faults as a read, a copy-on-write page gets its accessed bit set
 // before the write faults). leaves q = the write translation.
 proc rwchk(lin) {
-  q = tlbR[floor(lin / 4096) + tlbOff];
+  q = ${TR('lin')};
   if (q == 0) { tlb_fill(lin, 0); if (flt == 1) { return; } }
-  q = tlbW[floor(lin / 4096) + tlbOff];
+  q = ${TW('lin')};
   if (q == 0) { tlb_fill(lin, 1); }
 }
 // read-modify-write helpers for unaligned operands: verify writability, then read
@@ -442,8 +629,8 @@ proc do_interrupt(vec, soft, haserr, err, ret) {
 list bkTag[BN];
 list bkTp[BN];
 // (their initial contents are the seed: blocks decoded at build time, see decode.js)
-list tH = data("tH"); list tA = data("tA"); list tB = data("tB"); list tC = data("tC"); list tD = data("tD");
-list tE = data("tE"); list tF = data("tF"); list tI = data("tI");
+${cfg.lazy ? 'list tH[TN]; list tA[TN]; list tB[TN]; list tC[TN]; list tD[TN]; list tE[TN]; list tF[TN]; list tI[TN];' : `list tH = data("tH"); list tA = data("tA"); list tB = data("tB"); list tC = data("tC"); list tD = data("tD");
+list tE = data("tE"); list tF = data("tF"); list tI = data("tI");`}
 ${cfg.fuse && cfg.fuse.patterns && cfg.fuse.patterns.length ? 'list tO = data("tO");' : ''}
 const SEED_END = ${cfg.seedEnd || 16};  // first trace entry that is free for decoding
 var tp = TR_STOP, tnext = SEED_END, tw = 0;
@@ -479,7 +666,29 @@ proc flush_blocks() {
 
 // set tp to the trace of the code at eip, decoding it if needed. faults while fetching are delivered here,
 // so on return tp always points at something executable.
+${paged ? `var fb_i = 0, fb_pp = 0;
 proc find_block() {
+  chain_ok = 1;
+  vp = floor(eip / 4096);
+  // code is looked up by where it sits in ram, and that does not need the page in a frame: a table of its own
+  fb_i = vp % 1024 + jcOff;
+  if (ctT[fb_i] == vp + ebase) { fb_pp = ctP[fb_i]; }
+  else {
+    fetching = 1; flt = 0;
+    tf_vp = vp; walk(eip, 0);
+    fetching = 0;
+    // #PF on the fetch: it has been delivered and tp already sits on the handler (or on TR_STOP)
+    if (tf_ok == 0) { flt = 0; chain_ok = 0; return; }
+    if (tf_pp >= RAM_PAGES) { tf_pp = DUMMY_PAGE; }
+    fb_pp = tf_pp;
+    ctT[fb_i] = vp + ebase; ctP[fb_i] = fb_pp;
+  }
+  pk = fb_pp * 4096 + eip % 4096 + 4;
+  ci = pk % BN + 1;
+  if (bkTag[ci] == pk + vp * 33554432 + pgGen[fb_pp + 1] * GENMUL) { tp = bkTp[ci]; return; }
+  decode_block();
+}
+` : `proc find_block() {
   chain_ok = 1;
   vp = floor(eip / 4096);
   q = tlbR[vp + tlbOff];
@@ -495,5 +704,5 @@ proc find_block() {
   if (bkTag[ci] == pk + vp * 33554432 + pgGen[floor((pk - 4) / 4096) + 1] * GENMUL) { tp = bkTp[ci]; return; }
   decode_block();
 }
-`;
+`}`;
 };

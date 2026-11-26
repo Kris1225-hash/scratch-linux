@@ -6,7 +6,7 @@
 // and (compiled to JS) under node at full speed for debugging.
 //
 //   const N = 1 << 12;                    compile-time constant
-//   var a = 0, b;                         scratch variable on the current target
+//   var a = 0, b;                         scratch variable on the current target   (var s = data("key"); too)
 //   list reg[16];                         zero-filled list
 //   list t = [1, 2, 3];   list img = data("kernel");
 //   proc name(x, y) { ... }               custom block, "run without screen refresh"
@@ -143,9 +143,14 @@ class Parser {
       case 'var': {
         this.p++; const decls = [];
         do {
-          const name = this.ident(); let init = 0;
-          if (this.eat('=')) init = this.constValue(this.expr(), t);
-          decls.push({ name, init });
+          const name = this.ident(); let init = 0, dataKey;
+          if (this.eat('=')) {
+            if (this.isId('data')) {
+              this.p++; this.expect('('); const key = this.t; if (key.k !== 'str') this.err('expected data key string'); this.p++;
+              this.expect(')'); dataKey = key.v;
+            } else init = this.constValue(this.expr(), t);
+          }
+          decls.push({ name, init, dataKey });
         } while (this.eat(','));
         this.expect(';');
         return { t: 'vars', decls, tok: t };
@@ -382,7 +387,7 @@ class Program {
       else if (it.t === 'vars') {
         for (const d of it.decls) {
           if (cur.vars.has(d.name) || cur.lists.has(d.name)) throw new SblError(`${where}: ${d.name} already declared`);
-          cur.vars.set(d.name, { name: d.name, init: d.init });
+          cur.vars.set(d.name, { name: d.name, init: d.init, dataKey: d.dataKey });
         }
       } else if (it.t === 'list') {
         if (cur.vars.has(it.name) || cur.lists.has(it.name)) throw new SblError(`${where}: ${it.name} already declared`);
@@ -396,6 +401,12 @@ class Program {
   }
 }
 
+// a variable's initial value
+function varInit(v, data) {
+  if (v.dataKey === undefined) return v.init;
+  if (!data || !(v.dataKey in data)) throw new SblError(`var ${v.name}: no data for key "${v.dataKey}"`);
+  return data[v.dataKey];
+}
 // resolve a list's initial contents
 function listInit(l, data) {
   if (l.values) return l.values;
@@ -406,4 +417,4 @@ function listInit(l, data) {
   return null;    // zero-filled, l.size entries
 }
 
-module.exports = { SblError, Program, EXPR_BUILTINS, STMT_BUILTINS, LIST_ARG0, neg, fold, smod, listInit };
+module.exports = { SblError, Program, EXPR_BUILTINS, STMT_BUILTINS, LIST_ARG0, neg, fold, smod, listInit, varInit };

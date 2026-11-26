@@ -40,7 +40,7 @@ const KEYS = opt('--keys', null);
   let last = '', lastPrint = 0, steps = 0, lastType = 0, tapped = false;
   // key presses: one character every couple of frames once the prompt is up
   const keyq = KEYS ? [...KEYS.replace(/\\n/g, '\n')] : [];
-  let keyDown = null, keyWait = 0, keysStarted = false, bootSecs = 0;
+  let keyDown = null, keyWait = 0, keysStarted = false, bootSecs = 0, powerSecs = 0;
   const NAMES = { '\n': 'Enter', '\t': 'ArrowRight', '\b': 'ArrowLeft' };
   const atPrompt = () => /# $/.test(screen().split('\n').pop() + ' ');
   while ((Date.now() - start) / 1000 < SECS) {
@@ -53,6 +53,7 @@ const KEYS = opt('--keys', null);
       console.error(`[sb3] t=${el.toFixed(0)}s icount=${ic} (${(ic / el / 1000).toFixed(0)}k insn/s) halted=${m.getVar('halted')} blocks=${m.getVar('nblocks')} kips=${m.getVar('kips')}`);
       if (process.env.DEBUG_TAP) console.error(`[sb3]   asked=${asked} tapped=${tapped} lines=${lines.length} asking=${m.getVar('asking')} touch=${m.getVar('touch')} has_kbd=${m.getVar('has_kbd')} kbd_lines=${m.getList('kbd_lines').length} threads=${m.threads()} atPrompt=${atPrompt()}`);
     }
+    if (!powerSecs && +m.getVar('power') === 1) { powerSecs = (now - start) / 1000; console.error(`[sb3] power on after ${powerSecs.toFixed(1)}s (lists built, kernel in memory)`); }
     if (!bootSecs && steps % 8 === 0 && atPrompt()) {
       bootSecs = (now - start) / 1000;
       console.error(`[sb3] shell prompt after ${bootSecs.toFixed(1)}s (cpu ${(process.cpuUsage(cpu0).user / 1e6).toFixed(1)}s), ${m.getVar('icount')} dispatches, ${m.getVar('nblocks')} blocks (${m.getVar('n_seeded')} from the seed)`);

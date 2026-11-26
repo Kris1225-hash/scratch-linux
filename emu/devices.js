@@ -3,6 +3,8 @@
 
 module.exports = function devices(cfg) {
   const js = cfg.target === 'js';
+  const M = require('./mem')(cfg);
+  const cold = M.coldLists(cfg.ramMB * 256);
   // host clock for the cmos rtc: scratch has "current [year]" blocks, the js build asks its host
   const rtc = (k, sb) => js ? `hostf("rtc", ${k})` : `current("${sb}")`;
   return `
@@ -271,22 +273,42 @@ proc idle_skip() {
 }
 
 // ---------------------------------------------------------------- power-on
-list img = data("img");                // memory image words
-list imgdir = data("imgdir");          // [first word index, count] pairs describing where img goes
-var rs_i = 0, rs_j = 0, rs_k = 0, rs_n = 0;
+${cfg.packed ? '' : `list img = data("img");                // memory image words
+list imgdir = data("imgdir");          // [first word index, count] pairs describing where img goes`}
+var rs_i = 0, rs_j = 0, rs_k = 0, rs_n = 0;${M.paged ? ' var rs_p = 0, rs_m = 0;' : ''}
 const BOOT_EIP = ${cfg.bootEip};
 const BOOT_ESI = ${cfg.bootEsi};
 
 var mem_dirty = 0;                      // the project file ships with its memory zeroed: the first power-on can skip that
 proc reset() {
-  if (mem_dirty == 1) { rs_i = 1; repeat (MEM_WORDS) { memw[rs_i] = 0; rs_i += 1; } }
+${M.paged ? `  // nothing is in a frame, no tables
+  tlb_flush();
+  rs_i = 1; repeat (TLB_HALF * 2) { tlb1R[rs_i] = 1; tlb1W[rs_i] = 1; rs_i += 1; }
+  tlbPn = 1025;
+  rs_i = 1; repeat (NF) { fr_pp[rs_i] = 0; fr_ref[rs_i] = 0; fr_dirty[rs_i] = 0; fr_n[rs_i] = 0; fr_g[rs_i] = 0; rs_i += 1; }
+  rs_i = 1; repeat (RAM_PAGES + 2) { pgf[rs_i] = 0; rs_i += 1; }
+  hand = 0; nevict = 0; npgin = 0; npgout = 0; pin_a = 0; pin_b = 0; pin_c = 0; pin_d = 0;
+${cfg.packed ? '  // (ram was zeroed and the kernel unpacked into it before we got here: see emu/unpack.js)' : `  if (mem_dirty == 1) {
+${cold.map((c) => `    rs_i = 1; repeat (${c.pages * 1024}) { ${c.name}[rs_i] = 0; rs_i += 1; }`).join('\n')}
+  }
+  mem_dirty = 1;
+  // the image goes into the cold lists a page at a time, through frame 0
+  rs_j = 1; rs_k = 1;
+  repeat (len(imgdir) / 2) {
+    rs_p = (imgdir[rs_j] - 1) / 1024; rs_n = imgdir[rs_j + 1]; rs_j += 2;
+    until (rs_n < 1) {
+      rs_m = 1;
+      repeat (1024) { if (rs_n > 0) { memw[rs_m] = img[rs_k]; rs_k += 1; rs_n -= 1; } else { memw[rs_m] = 0; } rs_m += 1; }
+      pg_store(rs_p, 0); rs_p += 1;
+    }
+  }`}` : `  if (mem_dirty == 1) { rs_i = 1; repeat (MEM_WORDS) { memw[rs_i] = 0; rs_i += 1; } }
   mem_dirty = 1;
   rs_j = 1; rs_k = 1;
   repeat (len(imgdir) / 2) {
     rs_i = imgdir[rs_j]; rs_n = imgdir[rs_j + 1]; rs_j += 2;
     repeat (rs_n) { memw[rs_i] = img[rs_k]; rs_i += 1; rs_k += 1; }
   }
-  tlb_flush();
+  tlb_flush();`}
   rs_i = 1; repeat (BN) { bkTag[rs_i] = 0; rs_i += 1; }
   rs_i = 1; repeat (RAM_PAGES + 2) { codepg[rs_i] = 0; pgGen[rs_i] = 0; rs_i += 1; }
   // (epoch only ever grows, also across resets: the seed entries keep whatever chain caches the last run left

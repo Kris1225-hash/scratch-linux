@@ -216,7 +216,7 @@ function genJS(program, opts = {}) {
       `function wr(L, i, v, nm) { if (!(Number.isInteger(i) && i >= 1 && i <= L.length)) throw new Error('list ' + nm + ': bad write index ' + i + ' (len ' + L.length + ')'); if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error('list ' + nm + ': bad value ' + v); L[i - 1] = v; }`,
       `function ck(v, nm) { if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error('var ' + nm + ': bad value ' + v); return v; }`);
   }
-  for (const v of tgt.vars.values()) out.push(`let v_${v.name} = ${jsStr(v.init)};`);
+  for (const v of tgt.vars.values()) out.push(v.dataKey !== undefined ? `let v_${v.name} = D[${jsStr(v.dataKey)}];` : `let v_${v.name} = ${jsStr(v.init)};`);
   for (const l of tgt.lists.values()) {
     if (dynamic.has(l.name)) {
       if (l.dataKey !== undefined) out.push(`const L_${l.name} = Array.from(D[${jsStr(l.dataKey)}]);`);

@@ -1,14 +1,27 @@
 # scratch-linux
 
-a 486 pc made of scratch blocks, booting real mainline linux to a shell. yes, the scratch for kids.
+an x86 pc made of scratch blocks, booting real mainline linux to a shell. yes, the scratch for kids. (x86, not
+risc-v: that one had been done.)
 
-![linux 6.12 at a shell prompt inside the scratch editor](docs/scratch-editor.png)
+**run it: [scratch.mit.edu/projects/1444498783](https://scratch.mit.edu/projects/1444498783)** — green flag, about
+a minute, root shell. the same project in turbowarp gets there in four seconds:
+[turbowarp.org/1444498783](https://turbowarp.org/1444498783).
 
-the project is one `.sb3` file: about 18,000 blocks that implement an i486 cpu, its mmu, an interrupt controller,
-a timer, a serial port and a clock, plus a terminal drawn with the pen. the kernel (linux 6.12.119, unmodified)
-and a busybox userland sit in a list of numbers. press the green flag and roughly half a minute later you are
-looking at `root@scratch:/root#`. no turbowarp, no extensions (other than pen), no modified vm: it runs in the
-stock scratch 3 editor.
+![linux 6.12 at a shell prompt on its scratch.mit.edu project page](docs/scratch-site.jpg)
+
+the project is one `.sb3` file: 17,000 to 18,000 blocks that implement an i486 cpu, its mmu, the interrupt
+controllers, a timer, a serial port and a clock, plus a terminal drawn with the pen. the kernel (linux 6.12.119,
+unmodified) and a busybox userland are data inside it. press the green flag and a while later you are looking at
+`root@scratch:/root#`. no extensions (other than pen), no modified vm: it runs in the stock scratch 3 editor.
+
+it comes in two builds of the same emulator:
+
+| | `out/linux.sb3` | `out/linux-site.sb3` (`--site`) |
+|---|---|---|
+| project.json | 40 MB | 4.6 MB |
+| where it runs | scratch editor, loaded from a file | that, and scratch.mit.edu (which refuses to save more than 5 MB) |
+| flag to shell | 25 to 30 s | about a minute |
+| how | ram and tables are big lists in the file, the kernel arrives decoded | every big list is built at power-on, the kernel is unpacked from text ([below](#the-5-mb-version)) |
 
 nothing compiled is in this repo. it holds the sources, the configs and the build scripts; you build your own
 kernel and your own `.sb3`, and the build is the proof.
@@ -20,8 +33,9 @@ machine.
 
 ```
 npm install
-./build/docker.sh           # cross toolchain, busybox, /init, kernel -> out/kernel/vmlinux   (15 to 20 minutes the first time)
-node tools/build_sb3.js     # -> out/linux.sb3
+./build/docker.sh                  # cross toolchain, busybox, /init, kernel -> out/kernel/vmlinux   (15 to 20 minutes the first time)
+node tools/build_sb3.js            # -> out/linux.sb3
+node tools/build_sb3.js --site     # -> out/linux-site.sb3, the one that fits scratch.mit.edu
 ```
 
 `build/docker.sh` runs `build/build.sh` in an ubuntu container; on a linux box you can run `build/build.sh`
@@ -32,11 +46,16 @@ hashes are pinned in the script.
 
 ## run it
 
-- **in scratch:** open the scratch editor, *file → load from your computer*, pick `out/linux.sb3`, green flag.
-  (the project is ~38 MB of json. as far as i know scratch.mit.edu will not *save* anything over 5 MB, so it can be
-  loaded and run there but not shared. i have not tried.)
+- **on scratch.mit.edu:** the link at the top. or your own: *create*, *file → load from your computer*, pick
+  `out/linux-site.sb3`, and it saves like any other project (save it before the first green flag, or see the note
+  on saving below).
+- **in the scratch editor, from a file:** *file → load from your computer*, pick `out/linux.sb3` (the fast build;
+  scratch.mit.edu will run it but cannot save it), green flag.
 - **in the scratch editor on your own machine:** `(cd tools/gui && npm install)` once, then `npm run gui` and open
-  `http://127.0.0.1:8601/?go`. that is the unmodified `@scratch/scratch-gui` bundle with the project loaded.
+  `http://127.0.0.1:8601/?go` (`?site&go` for the site build). that is the unmodified `@scratch/scratch-gui` bundle
+  with the project loaded.
+
+  ![the fast build in the scratch editor](docs/scratch-editor.png)
 - **without a browser:** `node tools/run_sb3.js --keys 'uname -a\n'` boots the `.sb3` in the stock `scratch-vm`
   under node, presses keys, and prints the screen.
 - **without scratch:** `node tools/run.js --input 'uname -a\n'` runs the same emulator source compiled to
@@ -112,6 +131,33 @@ the tlb and throw the stale blocks away (linux patches its own text while bootin
 - an idle machine dozes: after five seconds with nothing to do, the clock runs slow so the 100 Hz timer
   interrupt is not what the cat spends its life on.
 
+## the 5 MB version
+
+scratch.mit.edu will not save a project whose `project.json` is over 5 MB. the fast build is 40 MB: 16 MB of ram
+as a list of zeros, a tlb with an entry per page, the kernel as a list of numbers, the decoder's output. and
+there is a second wall: a list that is built by blocks stops growing at 200,000 items. so "just create the zeros
+when the flag is clicked" is not an option for a 4-million-word ram. `--site` gets it to 4.6 MB like this:
+
+- **paged memory** ([`emu/mem.js`](emu/mem.js)). ram lives in 22 "cold" lists of 195 pages each, and the cpu
+  works on one "hot" list of 195 page frames. the tlb hands out addresses inside the frames, so the handlers'
+  fast paths are the ones of the fast build; a page that is not in a frame gets copied in, clock-fashion, and a
+  dirty one copied back out. linux touches about 870 different pages during a boot, in bursts: ~2,700 page-ins
+  for the whole boot, a few percent of the time.
+- **a two-level tlb** for the same reason: tables of 1024 entries, handed out as 4 MB stretches of address space
+  get used.
+- **the kernel as text** ([`tools/zpack.js`](tools/zpack.js), [`emu/unpack.js`](emu/unpack.js)). LZ77 plus an
+  rANS coder with static tables, its output written in base 93: every printable ascii character except the two
+  json would escape. 2.47 MB of memory image become 1.46 MB of project file, and the project unpacks it at
+  power-on, printing `decompressing linux ......` while it does, the way a pc would. scratch has no character
+  codes, so each digit is read by "switch costume to (letter)" on the terminal sprite, whose costumes happen to
+  be the printable characters.
+- **compact handlers.** two thirds of the instruction handlers together run 3% of the instructions. those call
+  procs for memory access instead of carrying the inline fast paths: 2,800 blocks less for 0.4% of the speed.
+- **no decoded kernel in the file.** the fast build's block cache starts out full; this one decodes as it goes.
+
+saving it: while it runs, its lists hold the 16 MB of ram, and scratch cannot save that either. the first script
+on the stage ("click me before saving") empties them.
+
 **the tricks that did not** are still in the tree, switched off, with the measurements that killed them:
 fusing common instruction sequences into single handlers (`tools/mkfuse.js`, `--fuse`) removes 38% of the
 dispatches and makes the project *slower*, because the stock interpreter gets slower per block the more distinct
@@ -126,9 +172,10 @@ blocks a hot loop touches (`test/bench_locality.js` shows the effect in isolatio
   another 42 million, run without a single difference. (it found about ten real bugs on the way there, down to
   "the accessed bit of a page directory entry is set even when the walk then faults".)
 - **against itself.** `tools/diffrun.js` runs the plain interpreter next to the configuration that ships (seeded
-  block cache), comparing the cpu after every instruction and all of memory at the end.
+  block cache), comparing the cpu after every instruction and all of memory at the end. `--site` does the same
+  for the emulator of the 5 MB build (paged memory, compact handlers): 32 million instructions, no difference.
 - **in scratch.** `tools/run_sb3.js` boots the actual `.sb3` in the unmodified `scratch-vm` package and types at
-  it; `tools/gui` puts it in the unmodified scratch editor.
+  it; `tools/gui` puts it in the unmodified scratch editor. the site build was booted on scratch.mit.edu itself.
 
 `npm test` runs the quick ones. the kernel itself is the best test there is: it does not boot on a cpu that is
 almost right.
@@ -140,13 +187,20 @@ instruction is ~47 blocks, half of them spent finding the handler. on a recent l
 300,000 instructions per second: about 25 seconds to the prompt under node, about 30 in the browser.
 `uname -a` takes two or three seconds. it is a 486 running at the speed of an 8088, which feels about right.
 
+the site build takes about a minute: ten seconds of building lists and unpacking, then a boot that is slower
+because nothing is decoded in advance (+20%) and memory is paged (+10%).
+
+turbowarp compiles scratch to javascript and runs either build at 4 to 5 million instructions per second.
+
 ## what is where
 
 ```
 sbl/      the language: parser, scratch (.sb3) backend, javascript backend, headless scratch-vm runner
-emu/      the machine, in sbl: cpu core, handlers, decoder, system instructions, devices, terminal + keyboard
+emu/      the machine, in sbl: cpu core, handlers, decoder, system instructions, devices, terminal + keyboard,
+          the two memory models (mem.js), the unpacker of the site build (unpack.js)
 build/    kernel config fragment, busybox config, /init, the scripts that build them
-tools/    build_sb3 (the project), run / run_sb3 (boot it), lockstep / diffrun (check it), profilers, gui
+tools/    build_sb3 (the project), zpack (the kernel as text), run / run_sb3 (boot it), lockstep / diffrun
+          (check it), profilers, gui
 test/     compiler tests and interpreter benchmarks
 ```
 

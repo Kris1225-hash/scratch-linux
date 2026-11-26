@@ -20,6 +20,8 @@ function parseArgs(argv) {
     else if (a === '--until-prompt') o.untilPrompt = true;
     else if (a === '--fuse') o.fuse = true;
     else if (a === '--seed') o.seed = true;
+    else if (a === '--paged') o.paged = true;         // the memory model of the scratch.mit.edu build (emu/mem.js)
+    else if (a === '--compact') o.compact = +argv[++i]; // rare handlers in their compact form (emu/handlers.js)
     else if (a === '--ram') o.ramMB = +argv[++i];
     else if (a === '--max') o.maxInsns = +argv[++i];
     else if (a === '--secs') o.timeLimit = +argv[++i];
@@ -33,6 +35,8 @@ function parseArgs(argv) {
 function makeMachine(opts) {
   const base = { target: 'js', ramMB: opts.ramMB, profile: !!opts.profile };
   const cfg0 = Object.assign(base, opts.cfg || {});
+  if (opts.paged) cfg0.paged = true;
+  if (opts.compact) cfg0.compact = opts.compact;
   // fused instruction sequences (out/fuse.json from tools/mkfuse.js) only on request: the plain interpreter,
   // one handler per instruction, is the reference that gets checked against qemu
   if (opts.fuse) {

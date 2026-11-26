@@ -3,6 +3,7 @@
 // It only runs the first time a piece of code is executed, so it is written for clarity, not speed.
 
 module.exports = function decode(cfg) {
+  const M = require('./mem')(cfg);
   // ---- opcode cases: [lo, hi, sbl]  (op: 0..255 one-byte map, 256..511 = 0F xx)
   const cases = [];
   const C = (lo, hi, code) => cases.push([lo, hi, code]);
@@ -238,7 +239,7 @@ proc dfetch8() {
     if (d_first == 0) { d_abort = 1; db = 0; d_eip += 1; return; }
     if (d_cross == 0) {
       d_cross = 1;
-      q = tlbR[floor(d_eip / 4096) + tlbOff];
+      q = ${M.TR('d_eip')};
       if (q == 0) {
         fetching = 1; flt = 0;
         tlb_fill(d_eip, 0);
@@ -523,7 +524,7 @@ proc decode_insn() {
 ${tree(0, cases.length, '  ')}
 }
 
-// ---- the seed: blocks that were decoded when the project was built (tools/mkseed.js boots the same kernel on
+${M.paged ? 'var n_seeded = 0;' : `// ---- the seed: blocks that were decoded when the project was built (tools/mkseed.js boots the same kernel on
 // the js build and keeps what the decoder produced). they sit in the trace lists from the start. a seed block
 // is used when it was decoded at this eip from exactly the memory words that are there now.
 const SEED_P = ${cfg.seedP || 61};
@@ -543,6 +544,7 @@ proc seed_try() {
   }
 }
 
+`}
 // decode the block at eip (find_block has already set vp, q, pk, ci) and point tp at it
 proc decode_block() {
   d_ci = ci;
@@ -551,9 +553,17 @@ proc decode_block() {
   d_pp = floor((pk - 4) / 4096);
   d_tag = pk + vp * 33554432 + pgGen[d_pp + 1] * GENMUL;
   if (codepg[d_pp + 1] == 0) { codepg[d_pp + 1] = 1; tlbw_flush(); }
-  d_q = q; d_pageend = (vp + 1) * 4096;
+  ${M.paged ? `// find_block only looked up where the code is. to read it, its page has to be in a frame
+  q = ${M.TR('eip')};
+  if (q == 0) {
+    fetching = 1; flt = 0;
+    tlb_fill(eip, 0);
+    fetching = 0;
+    if (flt == 1) { flt = 0; chain_ok = 0; return; }
+  }
+  d_q = q; d_pageend = (vp + 1) * 4096;` : `d_q = q; d_pageend = (vp + 1) * 4096;
   seed_try();
-  if (s_hit == 1) { bkTag[d_ci] = d_tag; bkTp[d_ci] = sd_tp[s_i]; tp = sd_tp[s_i]; nblocks += 1; n_seeded += 1; return; }
+  if (s_hit == 1) { bkTag[d_ci] = d_tag; bkTp[d_ci] = sd_tp[s_i]; tp = sd_tp[s_i]; nblocks += 1; n_seeded += 1; return; }`}
   d_eip = eip; tw = tnext; d_first = 1; d_abort = 0; d_cross = 0; d_fault = 0; d_stop = 0; d_n = 0; f_prev = 0;
   until (d_stop == 1) {
     d_tw0 = tw;

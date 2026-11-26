@@ -14,11 +14,27 @@
 // through LEA_TMP first).
 
 module.exports = function handlers(cfg) {
+  const M = require('./mem')(cfg);
   const H = [];
   const byName = new Map();
+  // handler bodies are written with macros for the things that have two forms: the inline one (fast, big) and
+  // a compact one (a proc call). a macro is \u0001NAME\u0002arg..\u0003 in the text; expand() picks the form.
+  // every handler gets the inline form unless cfg.compact says it is too rare to be worth the blocks.
+  const mk = (name, ...args) => `\u0001${name}\u0002${args.join('\u0002')}\u0003`;
+  const INLINE = {}, COMPACT = {};
+  const expand = (text, compact) => {
+    const re = /\u0001([A-Z0-9_]+)\u0002([^\u0001\u0003]*)\u0003/;
+    for (;;) {
+      const m = re.exec(text);
+      if (!m) return text;
+      const args = m[2].split('\u0002');
+      const f = (compact && COMPACT[m[1]]) || INLINE[m[1]];
+      text = text.slice(0, m.index) + f(...args) + text.slice(m.index + m[0].length);
+    }
+  };
   const def = (name, w, body) => {
     if (byName.has(name)) throw new Error('duplicate handler ' + name);
-    const h = { name, w, body, id: H.length + 1 };
+    const h = { name, w, tpl: body, body: expand(body, false), id: H.length + 1 };
     H.push(h); byName.set(name, h);
     return h;
   };
@@ -34,38 +50,59 @@ module.exports = function handlers(cfg) {
   // ---- inline memory fast paths (operate on linear address in `ea`)
   // @P@ marks the spots where a slow path (which may raise a fault) is entered: compiled units record which of
   // their instructions is running there, the plain interpreter drops the marker
-  const TLBR = `q = itemf(tlbR, ea / 4096 + tlbOff); if (q == 0) { @P@ tlb_fill(ea, 0); ${FAULT} }`;
-  const TLBW = `q = itemf(tlbW, ea / 4096 + tlbOff); if (q == 0) { @P@ tlb_fill(ea, 1); ${FAULT} }`;
-  const RD32 = (dst) => `if (ea % 4 == 0) { ${TLBR} ${dst} = memw[q + ea / 4]; } else { @P@ rd32u(ea); ${FAULT} ${dst} = rv; }`;
-  const WR32 = (val) => `if (ea % 4 == 0) { ${TLBW} memw[q + ea / 4] = ${val}; } else { @P@ wr32u(ea, ${val}); ${FAULT} }`;
-  const TLBRW = `q = itemf(tlbW, ea / 4096 + tlbOff); if (q == 0) { @P@ rwchk(ea); ${FAULT} }`;
-  const RMW32 = (dst) => `if (ea % 4 == 0) { ${TLBRW} mi = q + ea / 4; ${dst} = memw[mi]; } else { @P@ rmw32u(ea); ${FAULT} ${dst} = rv; mi = 0; }`;
-  const RMW32_END = (val) => `if (mi == 0) { wr32u(ea, ${val}); } else { memw[mi] = ${val}; }`;
-  const RD8 = (dst) => `${TLBR} ${dst} = floor(itemf(memw, q + ea / 4) / POW256[ea % 4 + 1]) % 256;`;
-  const RMW8 = (dst) => `${TLBRW} mi = q + floor(ea / 4); sh = POW256[ea % 4 + 1]; mw = memw[mi]; ${dst} = floor(mw / sh) % 256;`;
+  const TLBR = `q = ${M.TRf('ea')}; if (q == 0) { @P@ tlb_fill(ea, 0); ${FAULT} }`;
+  const TLBW = `q = ${M.TWf('ea')}; if (q == 0) { @P@ tlb_fill(ea, 1); ${FAULT} }`;
+  const TLBRW = `q = ${M.TWf('ea')}; if (q == 0) { @P@ rwchk(ea); ${FAULT} }`;
+  INLINE.RD32 = (dst) => `if (ea % 4 == 0) { ${TLBR} ${dst} = memw[q + ea / 4]; } else { @P@ rd32u(ea); ${FAULT} ${dst} = rv; }`;
+  INLINE.WR32 = (val) => `if (ea % 4 == 0) { ${TLBW} memw[q + ea / 4] = ${val}; } else { @P@ wr32u(ea, ${val}); ${FAULT} }`;
+  INLINE.RMW32 = (dst) => `if (ea % 4 == 0) { ${TLBRW} mi = q + ea / 4; ${dst} = memw[mi]; } else { @P@ rmw32u(ea); ${FAULT} ${dst} = rv; mi = 0; }`;
+  INLINE.RMW32_END = (val) => `if (mi == 0) { wr32u(ea, ${val}); } else { memw[mi] = ${val}; }`;
+  INLINE.RD8 = (dst) => `${TLBR} ${dst} = floor(itemf(memw, q + ea / 4) / POW256[ea % 4 + 1]) % 256;`;
+  INLINE.RMW8 = (dst) => `${TLBRW} mi = q + floor(ea / 4); sh = POW256[ea % 4 + 1]; mw = memw[mi]; ${dst} = floor(mw / sh) % 256;`;
+  INLINE.WR8 = (val) => `${TLBW} mi = q + floor(ea / 4); sh = POW256[ea % 4 + 1]; mw = memw[mi]; memw[mi] = mw + (${val} - floor(mw / sh) % 256) * sh;`;
+  INLINE.WR16 = (val) => `if (ea % 4 == 3) { @P@ wr16(ea, ${val}); ${FAULT} } else { ${TLBW} mi = q + floor(ea / 4); sh = POW256[ea % 4 + 1]; mw = memw[mi]; memw[mi] = mw + (${val} - floor(mw / sh) % 65536) * sh; }`;
+  INLINE.RD16 = (dst) => `if (ea % 4 == 3) { @P@ rd16(ea); ${FAULT} ${dst} = rv; } else { ${TLBR} ${dst} = floor(itemf(memw, q + ea / 4) / POW256[ea % 4 + 1]) % 65536; }`;
+  // the compact forms go through the slow-path procs (core.js) and a few more of their kind further down
+  COMPACT.RD32 = (dst) => `rd32(ea); ${FAULT} ${dst} = rv;`;
+  COMPACT.WR32 = (val) => `wr32(ea, ${val}); ${FAULT}`;
+  COMPACT.RMW32 = (dst) => `c_rmw32(); ${FAULT} ${dst} = rv;`;
+  COMPACT.RMW32_END = (val) => `c_rmw32e(${val});`;
+  COMPACT.RD8 = (dst) => `rd8(ea); ${FAULT} ${dst} = rv;`;
+  COMPACT.RMW8 = (dst) => `c_rmw8(); ${FAULT} ${dst} = rv;`;
+  COMPACT.WR8 = (val) => `wr8(ea, ${val}); ${FAULT}`;
+  COMPACT.WR16 = (val) => `wr16(ea, ${val}); ${FAULT}`;
+  COMPACT.RD16 = (dst) => `rd16(ea); ${FAULT} ${dst} = rv;`;
+  const RD32 = (dst) => mk('RD32', dst), WR32 = (val) => mk('WR32', val), RMW32 = (dst) => mk('RMW32', dst), RMW32_END = (val) => mk('RMW32_END', val);
+  const RD8 = (dst) => mk('RD8', dst), RMW8 = (dst) => mk('RMW8', dst), WR8 = (val) => mk('WR8', val), WR16 = (val) => mk('WR16', val), RD16 = (dst) => mk('RD16', dst);
   const RMW8_END = (old, val) => `memw[mi] = mw + (${val} - ${old}) * sh;`;
-  const WR8 = (val) => `${TLBW} mi = q + floor(ea / 4); sh = POW256[ea % 4 + 1]; mw = memw[mi]; memw[mi] = mw + (${val} - floor(mw / sh) % 256) * sh;`;
-  const WR16 = (val) => `if (ea % 4 == 3) { @P@ wr16(ea, ${val}); ${FAULT} } else { ${TLBW} mi = q + floor(ea / 4); sh = POW256[ea % 4 + 1]; mw = memw[mi]; memw[mi] = mw + (${val} - floor(mw / sh) % 65536) * sh; }`;
-  const RD16 = (dst) => `if (ea % 4 == 3) { @P@ rd16(ea); ${FAULT} ${dst} = rv; } else { ${TLBR} ${dst} = floor(itemf(memw, q + ea / 4) / POW256[ea % 4 + 1]) % 65536; }`;
   // ---- the stack window. spw is the memw index of the word esp points at, kept up to date by push / pop / call /
   // ret and friends so that they need no address translation at all. it is only trusted while esp sits strictly
   // inside a page it can write (word offset 1..1022: "spw % 1024 < 2" is false); 1 means "unknown". everything
   // that could make it stale (other writes to esp, tlb flushes, privilege changes) resets it to 1 or calls
   // sp_sync(), which works it out again from the write tlb.
   const SPSLOW = `spw % 1024 < 2`;
-  const PUSH32 = (val) => `if (${SPSLOW}) { sp = (reg[5] - 4) % 4294967296; ea = sp; ${WR32(val)} reg[5] = sp; sp_sync(); } else { spw -= 1; memw[spw] = ${val}; reg[5] = reg[5] - 4; }`;
+  INLINE.PUSH32 = (val) => `if (${SPSLOW}) { sp = (reg[5] - 4) % 4294967296; ea = sp; ${WR32(val)} reg[5] = sp; sp_sync(); } else { spw -= 1; memw[spw] = ${val}; reg[5] = reg[5] - 4; }`;
   // pop into a variable or register (never esp itself: the decoder sends "pop esp" down the generic lane)
-  const POP32 = (dst) => `if (${SPSLOW}) { sp = reg[5]; ea = sp; ${RD32('t0')} reg[5] = (sp + 4) % 4294967296; ${dst} = t0; sp_sync(); } else { ${dst} = memw[spw]; spw += 1; reg[5] = reg[5] + 4; }`;
+  INLINE.POP32 = (dst) => `if (${SPSLOW}) { sp = reg[5]; ea = sp; ${RD32('t0')} reg[5] = (sp + 4) % 4294967296; ${dst} = t0; sp_sync(); } else { ${dst} = memw[spw]; spw += 1; reg[5] = reg[5] + 4; }`;
+  COMPACT.PUSH32 = (val) => `c_push32(${val}); ${FAULT}`;
+  COMPACT.POP32 = (dst) => `c_pop32(); ${FAULT} ${dst} = rv;`;
+  const PUSH32 = (val) => mk('PUSH32', val), POP32 = (dst) => mk('POP32', dst);
 
   // 32-bit and through the byte table: bw = x & y   (x, y: variable names)
-  const AND32 = (x, y) => `bw = AND8[(${x} % 256) * 256 + ${y} % 256 + 1] + AND8[(floor(${x} / 256) % 256) * 256 + floor(${y} / 256) % 256 + 1] * 256 + AND8[(floor(${x} / 65536) % 256) * 256 + floor(${y} / 65536) % 256 + 1] * 65536 + AND8[floor(${x} / 16777216) * 256 + floor(${y} / 16777216) + 1] * 16777216;`;
+  INLINE.AND32 = (x, y) => `bw = AND8[(${x} % 256) * 256 + ${y} % 256 + 1] + AND8[(floor(${x} / 256) % 256) * 256 + floor(${y} / 256) % 256 + 1] * 256 + AND8[(floor(${x} / 65536) % 256) * 256 + floor(${y} / 65536) % 256 + 1] * 65536 + AND8[floor(${x} / 16777216) * 256 + floor(${y} / 16777216) + 1] * 16777216;`;
+  COMPACT.AND32 = (x, y) => `and32(${x}, ${y});`;
+  const AND32 = (x, y) => mk('AND32', x, y);
 
   // ---- control transfer
   // statically known target in tF; tA/tB cache the target's trace index and the epoch it was valid in
-  const JUMP_STATIC = `if (${B} == epoch) { tp = ${A}; } else { stp = tp; eip = tF[tp]; find_block(); if (chain_ok == 1) { tA[stp] = tp; tB[stp] = epoch; } }`;
+  INLINE.JUMP_STATIC = () => `if (${B} == epoch) { tp = ${A}; } else { stp = tp; eip = tF[tp]; find_block(); if (chain_ok == 1) { tA[stp] = tp; tB[stp] = epoch; } }`;
+  COMPACT.JUMP_STATIC = () => `c_jump();`;
+  const JUMP_STATIC = mk('JUMP_STATIC');
   // computed target in eip (ret, jmp reg ...): a small cache straight from eip to the trace, one half per
   // privilege level, entries tagged with the mapping epoch so that nothing stale can ever match
-  const JUMP_DYN = `jc = eip % 4096 + jcOff; if (jcKey[jc] == eip + ebase) { tp = jcTp[jc]; } else { find_block(); if (chain_ok == 1) { jcKey[jc] = eip + ebase; jcTp[jc] = tp; } }`;
+  INLINE.JUMP_DYN = () => `jc = eip % 4096 + jcOff; if (jcKey[jc] == eip + ebase) { tp = jcTp[jc]; } else { find_block(); if (chain_ok == 1) { jcKey[jc] = eip + ebase; jcTp[jc] = tp; } }`;
+  COMPACT.JUMP_DYN = () => `c_jumpd();`;
+  const JUMP_DYN = mk('JUMP_DYN');
 
   // ================================================================ pseudo ops
   def('STOP', 0, `return;`);
@@ -411,7 +448,15 @@ module.exports = function handlers(cfg) {
     number(n.l, d + 1); number(n.r, d + 1); n.first = n.l.first;
   };
   number(nodes[0], 0);
-  const bodyOf = (hh) => hh.body.split('@P@').join('');
+  // cfg.compact = the share of all dispatches that keeps the inline forms. the handlers that make up the rest
+  // (most of them: a few dozen do nearly all the work) get the compact ones. costs them a proc call per memory
+  // access and saves a couple of thousand blocks, which matters when the project file has a size limit.
+  if (cfg.compact) {
+    const total = H.reduce((a, hh) => a + hh.w, 0);
+    let acc = 0;
+    for (const hh of H.slice().sort((x, y) => y.w - x.w)) { if (acc > cfg.compact * total && !hh.fuse) hh.cold = true; acc += hh.w; }
+  }
+  const bodyOf = (hh) => (hh.cold ? expand(hh.tpl, true) : hh.body).split('@P@').join('');
   const tree = (n, ind) => {
     if (n.leaf) return `${ind}// ${n.leaf.name}\n${ind}${n.leaf.fuse ? n.leaf.body : bodyOf(n.leaf)}\n`;
     return `${ind}if (h < ${n.r.first}) {\n${tree(n.l, ind + ' ')}${ind}} else {\n${tree(n.r, ind + ' ')}${ind}}\n`;
@@ -428,11 +473,32 @@ ${H.slice(0, NINTERP).map((hh) => `const H_${hh.name} = ${hh.id};`).join('\n')}
 list HMAP = data("hmap");               // static handler id -> dispatch id
 ${patterns.length ? 'list ISUNIT = data("isunit");           // by dispatch id: 1 = fused sequence (the faulting eip is in xeip)' : ''}
 
+${cfg.compact ? `// ---- the compact forms of the memory macros (see the top of emu/handlers.js)
+proc c_rmw32() {                        // read at ea with intent to write back -> rv, mi (0 = not word aligned)
+  if (ea % 4 == 0) {
+    q = ${M.TW('ea')};
+    if (q == 0) { rwchk(ea); if (flt == 1) { return; } }
+    mi = q + ea / 4; rv = memw[mi];
+    return;
+  }
+  rmw32u(ea); mi = 0;
+}
+proc c_rmw32e(v) { if (mi == 0) { wr32u(ea, v); } else { memw[mi] = v; } }
+proc c_rmw8() {                         // -> rv, and mi / sh / mw for the write back
+  q = ${M.TW('ea')};
+  if (q == 0) { rwchk(ea); if (flt == 1) { return; } }
+  mi = q + floor(ea / 4); sh = POW256[ea % 4 + 1]; mw = memw[mi]; rv = floor(mw / sh) % 256;
+}
+proc c_push32(v) { ${expand(INLINE.PUSH32('v'), false).split('@P@').join('')} }
+proc c_pop32() { ${expand(INLINE.POP32('rv'), false).split('@P@').join('')} }
+proc c_jump() { ${INLINE.JUMP_STATIC()} }
+proc c_jumpd() { ${INLINE.JUMP_DYN()} }
+` : ''}
 ${cfg.spCheck ? `// debugging aid (js builds): the stack window must agree with esp and the write tlb between instructions
 proc sp_check() {
   if (spw == 1) { return; }
   if (tH[tp] == HMAP[H_SPSYNC]) { return; }      // esp has just been moved, the fix-up entry is next
-  if (reg[5] % 4 == 0) { q = tlbW[floor(reg[5] / 4096) + tlbOff]; if (q != 0) { if (spw == q + reg[5] / 4) { return; } } }
+  if (reg[5] % 4 == 0) { q = ${M.TW('reg[5]')}; if (q != 0) { if (spw == q + reg[5] / 4) { return; } } }
   fatal(50, tI[tp]);
 }` : ''}
 // run up to cnt trace entries
@@ -448,5 +514,5 @@ ${tree(nodes[0], '    ')}
   // by static id: 1 = the handler stores into reg[tA]. when tA is esp the decoder appends an SPSYNC entry.
   // (the stack handlers themselves keep the window right and are exempt.)
   const wra = H.map((hh) => (!hh.fuse && /(^|[;{}\s])reg\[tA\[tp\]\] = /.test(hh.body) && !/^(POP_R|MOV_RM_SP)$/.test(hh.name) ? 1 : 0));
-  return { src, H, byName, byDid, hmap, isunit, wra, fuseTable, ninterp: NINTERP, avgDepth: depthSum / wSum };
+  return { src, H, byName, byDid, hmap, isunit, wra, fuseTable, ninterp: NINTERP, avgDepth: depthSum / wSum, ncold: H.filter((hh) => hh.cold).length };
 };

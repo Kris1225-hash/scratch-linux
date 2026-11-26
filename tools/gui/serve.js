@@ -3,7 +3,8 @@
 // the real scratch editor on localhost, with out/linux.sb3 loaded into it.
 //   (cd tools/gui && npm install)      once: fetches @scratch/scratch-gui, about 250 MB
 //   node tools/gui/serve.js [--port 8601] [--sb3 out/linux.sb3]
-//   then open http://127.0.0.1:8601/   (?go presses the green flag too, ?player shows only the stage)
+//   then open http://127.0.0.1:8601/   (?go presses the green flag too, ?player shows only the stage,
+//   ?site loads out/linux-site.sb3, the build for scratch.mit.edu)
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +12,7 @@ const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf(n); return i < 0 ? d : args[i + 1]; };
 const PORT = +opt('--port', 8601);
 const SB3 = path.resolve(opt('--sb3', path.join(__dirname, '..', '..', 'out', 'linux.sb3')));
+const SITE = path.join(__dirname, '..', '..', 'out', 'linux-site.sb3');
 const DIST = path.join(__dirname, 'node_modules', '@scratch', 'scratch-gui', 'dist');
 if (!fs.existsSync(path.join(DIST, 'scratch-gui-standalone.js'))) {
   console.error('the scratch editor is not installed yet. run:  (cd tools/gui && npm install)');
@@ -23,6 +25,7 @@ http.createServer((req, res) => {
   let file;
   if (url === '/' || url === '/index.html') file = path.join(__dirname, 'index.html');
   else if (url === '/project.sb3') file = SB3;
+  else if (url === '/site.sb3') file = SITE;
   else {
     file = path.join(DIST, path.normalize(url));
     if (!file.startsWith(DIST + path.sep)) { res.writeHead(403).end(); return; }

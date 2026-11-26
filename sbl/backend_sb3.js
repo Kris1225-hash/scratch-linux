@@ -13,7 +13,7 @@
 //  - `x += e` becomes "change x by", `x -= c` "change x by -c"
 
 const crypto = require('crypto');
-const { SblError, STMT_BUILTINS, neg, listInit } = require('./sbl');
+const { SblError, STMT_BUILTINS, neg, listInit, varInit } = require('./sbl');
 
 const T_NUM = 4, T_POS = 5, T_WHOLE = 6, T_INT = 7, T_TEXT = 10;
 
@@ -108,6 +108,10 @@ class Project {
 
 function genSb3(program, project, opts = {}) {
   const data = opts.data || {};
+  // opts.lean: no empty shadow blocks under plugged-in reporters (8 bytes less per input in the file). not worth
+  // it for projects that go through the scratch editor: on load, scratch-vm 15 "repairs" such inputs by copying
+  // the shadow of some other block of the same kind, so the saved project has them all back, with odd values.
+  const lean = !!opts.lean;
   const stats = { blocks: 0 };
   const stageP = program.targets.get('Stage');
 
@@ -118,11 +122,12 @@ function genSb3(program, project, opts = {}) {
     if (!tgt) throw new SblError(`program uses target ${name} but the project has no such sprite`);
     const s = { vars: new Map(), lists: new Map(), procs: new Map() };
     sym.set(name, s);
-    for (const v of pt.vars.values()) { const id = project.uid('v'); s.vars.set(v.name, id); tgt.variables[id] = [v.name, v.init]; }
+    for (const v of pt.vars.values()) { const id = project.uid('v'); s.vars.set(v.name, id); tgt.variables[id] = [v.name, varInit(v, data)]; }
     for (const l of pt.lists.values()) {
       const id = project.uid('l'); s.lists.set(l.name, id);
       let init = listInit(l, data);
-      if (init === null) init = new Uint8Array(l.size);          // zeros; serialised as 0,0,0,...
+      // zeros; serialised as 0,0,0,...   (a "lazy" list is left empty: the program fills it itself when it starts)
+      if (init === null) init = l.lazy ? [] : new Uint8Array(l.size);
       tgt.lists[id] = [l.name, init];
     }
     for (const p of pt.procs.values()) {
@@ -247,9 +252,9 @@ function genSb3(program, project, opts = {}) {
     function numIn(e, parent, ty) {
       if (e.t === 'num') return [1, [ty, e.v]];
       if (e.t === 'str') return [1, [T_TEXT, e.v]];
-      if (e.t === 'var') { const f = varField(e.name, e.tok); return [3, [12, f[0], f[1]], [ty, '']]; }
+      if (e.t === 'var') { const f = varField(e.name, e.tok); return lean ? [2, [12, f[0], f[1]]] : [3, [12, f[0], f[1]], [ty, '']]; }
       if (e.t === 'listref') fail(e.tok, 'a list cannot be used as a value');
-      return [3, exprBlock(e, parent), [ty, '']];
+      return lean ? [2, exprBlock(e, parent)] : [3, exprBlock(e, parent), [ty, '']];
     }
     function boolIn(e, parent) {
       if (e.ty !== 'bool') fail(e.tok, 'condition must be a comparison (scratch needs a boolean block here)');
@@ -381,6 +386,21 @@ function genSb3(program, project, opts = {}) {
       fail(s.tok, `no scratch block for ${s.name}()`);
     }
 
+    // opts.hatsFirst: the hat scripts sit at the top of the workspace, in source order, with the custom blocks below
+    const hats = () => {
+    for (const h of pt.hats) {
+      let id;
+      if (h.kind === 'flag') id = blk('event_whenflagclicked', null);
+      else if (h.kind === 'key') id = blk('event_whenkeypressed', null, {}, { KEY_OPTION: [h.arg, null] });
+      else if (h.kind === 'stageclick') id = blk('event_whenstageclicked', null);
+      else if (h.kind === 'spriteclick') id = blk('event_whenthisspriteclicked', null);
+      else id = blk('event_whenbroadcastreceived', null, {}, { BROADCAST_OPTION: [h.arg, bcast(h.arg)] });
+      top(id);
+      const r = seq(h.body, id);
+      if (r) { B[id].next = r.first; B[r.first].parent = id; }
+    }
+    };
+    if (opts.hatsFirst) hats();
     for (const p of pt.procs.values()) {
       const info = my.procs.get(p.name);
       params = new Set(p.params);
@@ -394,17 +414,7 @@ function genSb3(program, project, opts = {}) {
       if (r) { B[def].next = r.first; B[r.first].parent = def; }
     }
     params = null;
-    for (const h of pt.hats) {
-      let id;
-      if (h.kind === 'flag') id = blk('event_whenflagclicked', null);
-      else if (h.kind === 'key') id = blk('event_whenkeypressed', null, {}, { KEY_OPTION: [h.arg, null] });
-      else if (h.kind === 'stageclick') id = blk('event_whenstageclicked', null);
-      else if (h.kind === 'spriteclick') id = blk('event_whenthisspriteclicked', null);
-      else id = blk('event_whenbroadcastreceived', null, {}, { BROADCAST_OPTION: [h.arg, bcast(h.arg)] });
-      top(id);
-      const r = seq(h.body, id);
-      if (r) { B[id].next = r.first; B[r.first].parent = id; }
-    }
+    if (!opts.hatsFirst) hats();
     void params;
   }
   void stageP;

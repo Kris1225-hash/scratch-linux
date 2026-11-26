@@ -8,10 +8,12 @@
   "scripts": {
     "kernel": "./build/docker.sh",
     "build": "node tools/build_sb3.js",
+    "build:site": "node tools/build_sb3.js --site",
     "boot": "node tools/run_sb3.js --until-prompt",
+    "boot:site": "node tools/run_sb3.js --sb3 out/linux-site.sb3 --until-prompt --secs 180",
     "js": "node tools/run.js",
     "gui": "node tools/gui/serve.js",
-    "test": "node test/compile_check.js && node test/sbl_basic.js && node tools/diffrun.js --max 12000000",
+    "test": "node test/compile_check.js && node test/sbl_basic.js && node tools/diffrun.js --max 12000000 && node tools/diffrun.js --site --max 12000000",
     "lockstep": "node tools/lockstep.js"
   },
   "dependencies": {

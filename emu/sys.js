@@ -2,6 +2,7 @@
 // i486SX core, part 4: the cold procs behind the generic ("G_") and system handlers.
 
 module.exports = function sys(cfg) {
+  const M = require('./mem')(cfg);
   // family 4 model 8, no fpu/vme/pse. ebx/ecx are what qemu's 486 reports (clflush size field, hypervisor bit) so the two stay comparable
   const c1 = cfg.cpuid1 || { eax: 0x480, ebx: 0x800, ecx: 2147483648, edx: 0 };
   return `
@@ -550,7 +551,7 @@ proc do_rdtsc() {
 // seg = reg[] index of the source segment base, sz = element size, rep: 0 none, 1 rep/repe, 2 repne.
 // a rep runs at most rep_chunk elements per call; ccr = 1 on return means "not done, run me again".
 var rep_chunk = ${cfg.repChunk || 4096};
-var st_d = 0, st_k = 0, st_src = 0, st_dst = 0, st_si = 0, st_di = 0, st_v = 0, st_cnt = 0, st_a = 0, st_b = 0, st_n = 0, st_hit = 0;
+var st_d = 0, st_k = 0, st_src = 0, st_dst = 0, st_si = 0, st_di = 0, st_v = 0, st_cnt = 0, st_a = 0, st_b = 0, st_n = 0, st_hit = 0;${M.paged ? ' var st_ev = 0;' : ''}
 
 proc str_ld(lin, sz) { if (sz == 4) { rd32(lin); } else { if (sz == 2) { rd16(lin); } else { rd8(lin); } } }
 proc str_st(lin, sz, v) { if (sz == 4) { wr32(lin, v); } else { if (sz == 2) { wr16(lin, v); } else { wr8(lin, v); } } }
@@ -583,12 +584,23 @@ proc str_movs(seg, sz, rep) {
     st_src = (reg[7] + reg[seg]) % M32; st_dst = reg[8];
     str_span(reg[2] * sz, 1);
     if (st_k > 0) {
-      q = tlbR[floor(st_src / 4096) + tlbOff];
+${M.paged ? `      // two translations at once: bringing the second page in may push the first one out of its frame. the last
+      // pages the tlb handed out are safe from that, so going round again settles it
+      st_ev = 0 - 1;
+      until (st_ev == nevict) {
+        st_ev = nevict;
+        q = ${M.TR('st_src')};
+        if (q == 0) { tlb_fill(st_src, 0); if (flt == 1) { return; } }
+        st_si = q + st_src / 4;
+        q = ${M.TW('st_dst')};
+        if (q == 0) { tlb_fill(st_dst, 1); if (flt == 1) { return; } }
+        st_di = q + st_dst / 4;
+      }` : `      q = tlbR[floor(st_src / 4096) + tlbOff];
       if (q == 0) { tlb_fill(st_src, 0); if (flt == 1) { return; } }
       st_si = q + st_src / 4;
       q = tlbW[floor(st_dst / 4096) + tlbOff];
       if (q == 0) { tlb_fill(st_dst, 1); if (flt == 1) { return; } }
-      st_di = q + st_dst / 4;
+      st_di = q + st_dst / 4;`}
       // (eight words per turn of the loop; in order, as an overlapping copy expects)
       repeat (floor(st_k / 8)) {
         memw[st_di] = memw[st_si]; memw[st_di + 1] = memw[st_si + 1]; memw[st_di + 2] = memw[st_si + 2]; memw[st_di + 3] = memw[st_si + 3];
@@ -622,7 +634,7 @@ proc str_stos(seg, sz, rep) {
     st_dst = reg[8];
     str_span(reg[2] * sz, 0);
     if (st_k > 0) {
-      q = tlbW[floor(st_dst / 4096) + tlbOff];
+      q = ${M.TW('st_dst')};
       if (q == 0) { tlb_fill(st_dst, 1); if (flt == 1) { return; } }
       st_di = q + st_dst / 4;
       repeat (floor(st_k / 8)) {
@@ -701,7 +713,7 @@ proc str_scas(seg, sz, rep) {
     st_dst = reg[8];
     if (sz == 1 && fl_df == 0 && rep_chunk > 1) {
       // byte scan forward (strlen / memchr): walk one page at a time through a single translation
-      q = tlbR[floor(st_dst / 4096) + tlbOff];
+      q = ${M.TR('st_dst')};
       if (q == 0) { tlb_fill(st_dst, 0); if (flt == 1) { return; } }
       st_n = 4096 - st_dst % 4096;
       if (reg[2] < st_n) { st_n = reg[2]; }

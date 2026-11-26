@@ -12,6 +12,10 @@ const { Project, svgCostume, genSb3 } = require('../sbl/backend_sb3');
 async function build(opts = {}) {
   const root = path.join(__dirname, '..');
   const cfg0 = Object.assign({ target: 'sb3', ramMB: 16, strictOpcodes: false }, opts.cfg || {});
+  // --site: the build that fits scratch.mit.edu's 5 MB project.json limit. paged memory (emu/mem.js), every
+  // big list built at run time, the kernel packed into text (tools/zpack.js), no pre-decoded block cache
+  // and the handlers that hardly ever run in their compact form (emu/handlers.js)
+  if (opts.site) { Object.assign(cfg0, { paged: true, lazy: true, packed: true, traceSize: 200000, compact: 0.97 }, opts.cfg || {}); opts.noSeed = true; }
   const vt = cfg0.vtPerInsn || 0.125;
   const lpj = Math.round(11931.82 / vt / 2);
   const cmdline = opts.cmdline || `console=ttyS0 clocksource=jiffies lpj=${lpj}`;
@@ -22,6 +26,7 @@ async function build(opts = {}) {
   // off by default: in the stock scratch vm the extra blocks cost more than the saved dispatches bring (README)
   if (opts.fuse) { fuse = JSON.parse(fs.readFileSync(opts.fuse, 'utf8')); weights = fuse.weights; }
   const cfg1 = Object.assign({ bootEip: image.entry, bootEsi: image.bootParams, weights: opts.noProfile ? undefined : weights, fuse }, cfg0);
+  if (cfg1.packed) cfg1.pack = require('./zpack').packImage(image);
   // boot once on the js build and keep the decoder's output: the project starts with its kernel already decoded
   let seedStats = null;
   if (!opts.noSeed) { cfg1.seed = require('./mkseed').makeSeed(cfg1, image); seedStats = cfg1.seed.stats; }
@@ -32,9 +37,9 @@ async function build(opts = {}) {
   proj.meta.agent = 'scratch-linux (sbl)';
   proj.stage.costumes.push(svgCostume('screen', `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360"><rect width="480" height="360" fill="${font.BG}"/></svg>`, 240, 180));
   proj.addSprite('term', { costumes: font.costumes(svgCostume), x: -240, y: 180, currentCostume: 95 });
-  const stats = genSb3(built.prog, proj, { data: built.data });
+  const stats = genSb3(built.prog, proj, { data: built.data, hatsFirst: !!opts.site });
   const sb3 = await proj.toSb3();
-  const out = opts.out || path.join(root, 'out', 'linux.sb3');
+  const out = opts.out || path.join(root, 'out', opts.site ? 'linux-site.sb3' : 'linux.sb3');
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, sb3);
   return { out, stats, bytes: sb3.length, cmdline, built, proj, seedStats };
@@ -44,7 +49,7 @@ if (require.main === module) {
   const arg = (n, d) => (process.argv.includes(n) ? process.argv[process.argv.indexOf(n) + 1] : d);
   const ram = +arg('--ram', 16);
   const t0 = Date.now();
-  build({ cfg: { ramMB: ram }, noSeed: process.argv.includes('--no-seed'), fuse: arg('--fuse', undefined), out: arg('--out', undefined) }).then((r) => {
+  build({ cfg: { ramMB: ram }, site: process.argv.includes('--site'), noSeed: process.argv.includes('--no-seed'), fuse: arg('--fuse', undefined), out: arg('--out', undefined) }).then((r) => {
     const json = r.proj.projectJsonChunks().reduce((n, c) => n + c.length, 0);
     console.log(`${path.relative(process.cwd(), r.out)}: ${(r.bytes / 1048576).toFixed(2)} MB zipped, project.json ${(json / 1048576).toFixed(1)} MB, ${r.stats.blocks} blocks, ${r.built.handlers.length} handlers (${r.built.nfused} fused sequences), tree depth ${r.built.avgDepth.toFixed(2)}, ${Date.now() - t0} ms`);
     if (r.seedStats) console.log(`seed: ${r.seedStats.blocks} pre-decoded blocks, ${r.seedStats.entries} trace entries, ${r.seedStats.words} memory words to check them against`);

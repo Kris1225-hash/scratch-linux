@@ -9,5 +9,8 @@ const src = genJS(prog, { strict: true });
 const path = require('path');
 require('fs').mkdirSync(path.join(__dirname, '..', 'out'), { recursive: true });
 require('fs').writeFileSync(path.join(__dirname, '..', 'out', 'emu_strict.js'), src);
+// the emulator of the scratch.mit.edu build: paged memory, compact handlers
+const site = buildEmu({ target: 'js', paged: true, compact: 0.97 });
+genJS(site.prog, { strict: true });
 const st = prog.targets.get('Stage');
-console.log(`ok: ${handlers.length} handlers, ${st.procs.size} procs, ${st.vars.size} vars, ${st.lists.size} lists, js ${(src.length / 1024).toFixed(0)} KB, ${Date.now() - t0} ms`);
+console.log(`ok: ${handlers.length} handlers, ${st.procs.size} procs, ${st.vars.size} vars, ${st.lists.size} lists, js ${(src.length / 1024).toFixed(0)} KB; site variant: ${site.ncold} compact handlers; ${Date.now() - t0} ms`);

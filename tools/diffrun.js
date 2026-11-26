@@ -6,6 +6,8 @@
 // of B, A executes the same instructions and the complete cpu state is compared; memory is compared every so
 // often and at the end. the workload is a boot and a few shell lines.
 //   node tools/diffrun.js [--max N] [--fuse out/fuse.json] [--no-seed] [--mem-every N] [--show]
+// --site: B is the emulator of the scratch.mit.edu build instead: paged memory (emu/mem.js), rare handlers in
+// their compact form, no seed.   --paged: only the memory model
 const fs = require('fs');
 const path = require('path');
 const { makeMachine } = require('./run');
@@ -23,7 +25,9 @@ const WORK = opt('--work', '') ? opt('--work', '').split('\\n') : [
 ];
 
 const A = makeMachine({ ramMB: 16, cfg: { sliceInsns: 1 } });
-const B = makeMachine({ ramMB: 16, fuse: opt('--fuse', false), seed: !process.argv.includes('--no-seed'), cfg: { sliceInsns: 1 } });
+const SITE = process.argv.includes('--site');
+const PAGED = SITE || process.argv.includes('--paged');
+const B = makeMachine({ ramMB: 16, fuse: opt('--fuse', false), seed: !PAGED && !process.argv.includes('--no-seed'), paged: PAGED, compact: SITE ? 0.97 : 0, cfg: { sliceInsns: 1 } });
 const a = A.inst, b = B.inst;
 const VT = 0.125;
 const unitN = new Map();                 // dispatch id -> instructions in the fused sequence
@@ -62,8 +66,17 @@ function diffState() {
   for (const k of ['cpl', 'cr0', 'cr2', 'cr3', 'halted', 'halt_code', 'fl_if', 'irq_out']) if (a.vars[k] !== b.vars[k]) d.push(`${k}: reference ${a.vars[k]} fused ${b.vars[k]}`);
   return d;
 }
+// word i of physical memory in the paged model: in its frame if the page has one, else in its cold list
+function pagedWord(L, i) {
+  const pp = i >>> 10, f = L.pgf[pp];
+  return f > 0 ? L.memw[(f - 1) * 1024 + (i & 1023)] : L['c' + Math.floor(pp / 195)][(pp % 195) * 1024 + (i & 1023)];
+}
 function diffMem() {
   const ma = a.lists.memw, mb = b.lists.memw;
+  if (PAGED) {
+    for (let i = 0; i < 16 * 262144; i++) { const w = pagedWord(b.lists, i); if (ma[i] !== w) return `memory word at phys ${hx(i * 4)}: reference ${hx(ma[i])} shipped ${hx(w)}`; }
+    return null;
+  }
   for (let i = 0; i < ma.length; i++) if (ma[i] !== mb[i]) return `memory word at phys ${hx(i * 4)}: reference ${hx(ma[i])} shipped ${hx(mb[i])}`;
   return null;
 }
@@ -133,6 +146,6 @@ while (n < MAX) {
 const md = diffMem();
 if (md) fail(md);
 const dt = (Date.now() - t0) / 1000;
-console.log(`[diffrun] blocks: ${b.vars.nblocks} looked up, ${b.vars.n_seeded} of them came from the seed`);
+console.log(`[diffrun] blocks: ${b.vars.nblocks} looked up, ${b.vars.n_seeded} of them came from the seed` + (PAGED ? `; paged model: ${b.vars.npgin} page-ins, ${b.vars.npgout} page-outs` : ''));
 console.log(`[diffrun] OK: ${n} dispatches = ${insns} instructions compared in ${dt.toFixed(1)}s; ${unitRuns} fused dispatches covering ${unitInsns} instructions (${(100 * unitInsns / insns).toFixed(1)}%), ${faultsInUnits} faults inside fused sequences, ${line}/${WORK.length} shell lines, memory identical`);
 if (process.argv.includes('--show')) process.stdout.write(outB.replace(/\0/g, '').slice(-1500) + '\n');
